@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CODMunityTop250Collector.UpdateHost</AssemblyName>
+    <ApplicationIcon>..\CODMunityTop250Collector.App\Assets\codmunity-logo.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="..\CODMunityTop250Collector.App\Assets\codmunity-logo.png" Link="Assets\codmunity-logo.png" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,44 @@
+{
+  "sha256Builds": {
+    "E3B01E54FFDF2E2BC23F10551457A10CA7288DEA461BAEBEB19976F8F49D53FA": {
+      "platform": "battlenet",
+      "layout": "bnet-current",
+      "exporterSet": "bnet"
+    },
+    "0FC9782DD49202B8917CD8CEFB673EE3E1C16B16EE7E92F8525BD895E18C96D3": {
+      "platform": "battlenet",
+      "layout": "bnet-20260814",
+      "exporterSet": "bnet-20260814"
+    },
+    "0D40348074F8CAFBDF3F76BFBBC5193BF7E4A31146F7225EFF5C7706436239D9": {
+      "platform": "steam",
+      "layout": "steam-current",
+      "exporterSet": "steam"
+    }
+  },
+  "runtimeBuilds": {
+    "pe64-6A4F49C2-239D8C00-0AFAA938-8664-10-1C8B367F": {
+      "platform": "xbox",
+      "layout": "xbox-current",
+      "exporterSet": "xbox"
+    }
+  },
+  "battlenetLayoutDefinitions": {
+    "bnet-20260814": {
+      "priority": 2,
+      "datasets": {
+        "mp": { "stateRva": "0x128AEE30", "countRva": "0x128EA57C", "entry0Rva": "0x128EA580" },
+        "br": { "stateRva": "0x12930F20", "countRva": "0x1296C66C", "entry0Rva": "0x1296C670" },
+        "resurgence": { "stateRva": "0x129B3010", "countRva": "0x129EE75C", "entry0Rva": "0x129EE760" }
+      }
+    },
+    "bnet-current": {
+      "priority": 1,
+      "datasets": {
+        "mp": { "stateRva": "0x128B8BB0", "countRva": "0x128F42FC", "entry0Rva": "0x128F4300" },
+        "br": { "stateRva": "0x1293ACA0", "countRva": "0x129763EC", "entry0Rva": "0x129763F0" },
+        "resurgence": { "stateRva": "0x129BCD90", "countRva": "0x129F84DC", "entry0Rva": "0x129F84E0" }
+      }
+    }
+  }
+}

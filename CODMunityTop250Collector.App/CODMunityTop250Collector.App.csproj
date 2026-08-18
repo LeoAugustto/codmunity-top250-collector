@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Assets\codmunity-logo.ico</ApplicationIcon>
+    <AssemblyName>CODMunityTop250Collector</AssemblyName>
+    <Version>0.1.18-alpha</Version>
+    <AssemblyVersion>0.1.18.0</AssemblyVersion>
+    <FileVersion>0.1.18.0</FileVersion>
+    <AssemblyInformationalVersion>0.1.18-alpha</AssemblyInformationalVersion>
+    <ClosedBetaToken>$([System.Environment]::GetEnvironmentVariable('CODMUNITY_RANKED_SYNC_TOKEN_BUILD'))</ClosedBetaToken>
+    <EmbeddedTokenResource>$(MSBuildProjectDirectory)\obj\$(Configuration)\$(TargetFramework)\Generated\embedded-ranked-sync-token.txt</EmbeddedTokenResource>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\CODMunityTop250Collector.Core\CODMunityTop250Collector.Core.csproj" />
+    <ProjectReference Include="..\CODMunityTop250Collector.Updater\CODMunityTop250Collector.Updater.csproj" />
+    <ProjectReference Include="..\CODMunityTop250Collector.UpdateHost\CODMunityTop250Collector.UpdateHost.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <PropertyGroup>
+    <EngineSource>$(MSBuildThisFileDirectory)..\engine</EngineSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(EngineSource)\top250_orchestrator.ps1" Link="engine\top250_orchestrator.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(EngineSource)\build_layouts.json" Link="engine\build_layouts.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(EngineSource)\exporters\**\*" Link="engine\exporters\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\codmunity-logo.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Resource Include="Assets\codmunity-logo.png" />
+    <EmbeddedResource Include="Updater\codmunity-top250-release-public.pem" />
+    <EmbeddedResource Include="$(EmbeddedTokenResource)" LogicalName="CODMunityTop250Collector.App.EmbeddedRankedSyncToken" Visible="false" />
+  </ItemGroup>
+  <!-- Internal / Closed Beta only. The secret is supplied by the release environment, never source control. -->
+  <Target Name="GenerateEmbeddedRankedSyncTokenResource" BeforeTargets="PrepareResources">
+    <MakeDir Directories="$(MSBuildProjectDirectory)\obj\$(Configuration)\$(TargetFramework)\Generated" />
+    <WriteLinesToFile File="$(EmbeddedTokenResource)" Overwrite="true" Lines="$(ClosedBetaToken)" />
+  </Target>
+  <Target Name="RemoveEmbeddedRankedSyncTokenResource" AfterTargets="CoreCompile">
+    <Delete Files="$(EmbeddedTokenResource)" />
+  </Target>
+  <Target Name="CopyUpdateHostToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <UpdateHostFiles Include="$(MSBuildThisFileDirectory)..\CODMunityTop250Collector.UpdateHost\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\CODMunityTop250Collector.UpdateHost.exe" />
+      <UpdateHostFiles Include="$(MSBuildThisFileDirectory)..\CODMunityTop250Collector.UpdateHost\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\CODMunityTop250Collector.UpdateHost.dll" />
+      <UpdateHostFiles Include="$(MSBuildThisFileDirectory)..\CODMunityTop250Collector.UpdateHost\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\CODMunityTop250Collector.UpdateHost.deps.json" />
+      <UpdateHostFiles Include="$(MSBuildThisFileDirectory)..\CODMunityTop250Collector.UpdateHost\bin\$(Configuration)\net8.0-windows\$(RuntimeIdentifier)\CODMunityTop250Collector.UpdateHost.runtimeconfig.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UpdateHostFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="false" />
+  </Target>
+</Project>

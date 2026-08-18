@@ -1,0 +1,230 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:netfx="http://wixtoolset.org/schemas/v4/wxs/netfx"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="CODMunity Top 250 Collector"
+           Manufacturer="CODMunity"
+           Version="0.1.18"
+           UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
+           Scope="perUser"
+           InstallerVersion="500">
+    <SummaryInformation Description="CODMunity Top 250 Collector" Manufacturer="CODMunity" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of CODMunity Top 250 Collector is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(var.ProjectDir)..\CODMunityTop250Collector.App\Assets\codmunity-logo.ico" />
+    <Binary Id="WixUI_Bmp_Banner" SourceFile="$(var.ProjectDir)Assets\bannrbmp.bmp" />
+    <Binary Id="WixUI_Bmp_Dialog" SourceFile="$(var.ProjectDir)Assets\dlgbmp.bmp" />
+    <Binary Id="WixUI_Ico_Exclam" SourceFile="$(var.ProjectDir)Assets\exclamic.ico" />
+    <Binary Id="WixUI_Ico_Info" SourceFile="$(var.ProjectDir)Assets\info.ico" />
+    <Binary Id="WixUI_Bmp_New" SourceFile="$(var.ProjectDir)Assets\new.ico" />
+    <Binary Id="WixUI_Bmp_Up" SourceFile="$(var.ProjectDir)Assets\up.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="DESKTOP_SHORTCUT" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch CODMunity Top 250 Collector" />
+    <WixVariable Id="override WixUICostingPopupOptOut" Value="1" />
+    <CustomAction Id="LaunchCollector" FileRef="CollectorExe" ExeCommand="" Execute="immediate" Return="asyncNoWait" Impersonate="yes" />
+
+    <netfx:DotNetCompatibilityCheck Id="DotNetDesktopRuntime8X64"
+                                     Property="DOTNET_DESKTOP_RUNTIME_8_X64"
+                                     RuntimeType="desktop"
+                                     Platform="x64"
+                                     Version="8.0.0"
+                                     RollForward="latestPatch" />
+    <Launch Condition="Installed OR DOTNET_DESKTOP_RUNTIME_8_X64 = 0"
+            Message="Microsoft .NET 8 Desktop Runtime (x64) is required to run CODMunity Top 250 Collector." />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Component Id="ProgramsFolderCleanup" Guid="{C1E8A16B-4937-4E2E-98BD-4EDCD9B231C9}">
+          <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="ProgramsFolderCleanup" Type="integer" Value="1" KeyPath="yes" />
+          <RemoveFolder Id="RemoveProgramsFolderIfEmpty" On="uninstall" />
+        </Component>
+        <Directory Id="INSTALLFOLDER" Name="CODMunity Top 250 Collector">
+          <Component Id="ApplicationFiles" Guid="{D6E45A4E-322B-47E2-B533-5C05F16E40BE}">
+            <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="ApplicationFiles" Type="integer" Value="1" KeyPath="yes" />
+            <File Id="CollectorExe" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.exe">
+              <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="CODMunity Top 250 Collector" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+            </File>
+            <File Id="CollectorCoreDll" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.Core.dll" />
+            <File Id="CollectorDepsJson" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.deps.json" />
+            <File Id="CollectorDll" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.dll" />
+            <File Id="CollectorRuntimeConfig" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.runtimeconfig.json" />
+            <File Id="CollectorUpdaterDll" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.Updater.dll" />
+            <File Id="UpdateHostExe" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.UpdateHost.exe" />
+            <File Id="UpdateHostDll" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.UpdateHost.dll" />
+            <File Id="UpdateHostDepsJson" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.UpdateHost.deps.json" />
+            <File Id="UpdateHostRuntimeConfig" Source="$(var.ProjectDir)..\dist\portable\CODMunityTop250Collector.UpdateHost.runtimeconfig.json" />
+            <RemoveFile Id="RemoveApplicationFiles" Name="*" On="uninstall" />
+            <RemoveFolder Id="RemoveApplicationFolder" On="uninstall" />
+          </Component>
+          <Component Id="DesktopShortcut" Guid="{B64A8280-6308-4686-9237-42A4146D5F6E}" Condition="DESKTOP_SHORTCUT = &quot;1&quot;">
+            <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+            <Shortcut Id="DesktopShortcutLink" Directory="DesktopFolder" Name="CODMunity Top 250 Collector" Target="[INSTALLFOLDER]CODMunityTop250Collector.exe" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+          </Component>
+          <Directory Id="AssetsFolder" Name="Assets">
+            <Component Id="AssetsFiles" Guid="{6F925CE8-7E39-46F3-A1B7-B4B0459E252B}">
+              <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="AssetsFiles" Type="integer" Value="1" KeyPath="yes" />
+              <File Id="TrayIcon" Source="$(var.ProjectDir)..\dist\portable\Assets\codmunity-logo.ico" />
+              <RemoveFile Id="RemoveAssetsFiles" Name="*" On="uninstall" />
+              <RemoveFolder Id="RemoveAssetsFolder" On="uninstall" />
+            </Component>
+          </Directory>
+          <Directory Id="EngineFolder" Name="engine">
+            <Component Id="EngineRootFiles" Guid="{6F9617F9-7D05-4C3A-A8D0-8CDE43E32C02}">
+              <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="EngineRootFiles" Type="integer" Value="1" KeyPath="yes" />
+              <File Id="BuildLayouts" Source="$(var.ProjectDir)..\dist\portable\engine\build_layouts.json" />
+              <File Id="Orchestrator" Source="$(var.ProjectDir)..\dist\portable\engine\top250_orchestrator.ps1" />
+              <RemoveFile Id="RemoveEngineRootFiles" Name="*" On="uninstall" />
+              <RemoveFolder Id="RemoveEngineFolder" On="uninstall" />
+            </Component>
+            <Directory Id="ExportersFolder" Name="exporters">
+              <Component Id="ExportersFolderCleanup" Guid="{364E35D7-16B8-4CCB-B582-CF39A75442EA}">
+                <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="ExportersFolderCleanup" Type="integer" Value="1" KeyPath="yes" />
+                <RemoveFolder Id="RemoveExportersFolder" On="uninstall" />
+              </Component>
+              <Component Id="BnetDynamicExporter" Guid="{D134838D-487A-4A7A-8CE1-689F2A4BE4D4}">
+                <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="BnetDynamicExporter" Type="integer" Value="1" KeyPath="yes" />
+                <File Id="BnetDynamicExporterFile" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\top250_bnet_dynamic_layout.ps1" />
+              </Component>
+              <Directory Id="BnetExportersFolder" Name="bnet">
+                <Component Id="BnetExporters" Guid="{A1A08797-ECF6-4D2A-AB82-C51A1DA01E10}">
+                  <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="BnetExporters" Type="integer" Value="1" KeyPath="yes" />
+                  <File Id="BnetMp" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet\top250_mp.ps1" />
+                  <File Id="BnetBr" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet\top250_br.ps1" />
+                  <File Id="BnetResurgence" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet\top250_resurgence.ps1" />
+                  <RemoveFile Id="RemoveBnetExporters" Name="*" On="uninstall" />
+                  <RemoveFolder Id="RemoveBnetExportersFolder" On="uninstall" />
+                </Component>
+              </Directory>
+              <Directory Id="Bnet20260814ExportersFolder" Name="bnet-20260814">
+                <Component Id="Bnet20260814Exporters" Guid="{77B3B3B8-5D38-4503-B93B-327B2DD9E2B2}">
+                  <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="Bnet20260814Exporters" Type="integer" Value="1" KeyPath="yes" />
+                  <File Id="Bnet20260814Mp" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet-20260814\top250_mp.ps1" />
+                  <File Id="Bnet20260814Br" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet-20260814\top250_br.ps1" />
+                  <File Id="Bnet20260814Resurgence" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\bnet-20260814\top250_resurgence.ps1" />
+                  <RemoveFile Id="RemoveBnet20260814Exporters" Name="*" On="uninstall" />
+                  <RemoveFolder Id="RemoveBnet20260814ExportersFolder" On="uninstall" />
+                </Component>
+              </Directory>
+              <Directory Id="SteamExportersFolder" Name="steam">
+                <Component Id="SteamExporters" Guid="{E532B2D7-79B6-4A29-B7DE-875ACA31558D}">
+                  <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="SteamExporters" Type="integer" Value="1" KeyPath="yes" />
+                  <File Id="SteamMp" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\steam\top250_mp.ps1" />
+                  <File Id="SteamBr" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\steam\top250_br.ps1" />
+                  <File Id="SteamResurgence" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\steam\top250_resurgence.ps1" />
+                  <RemoveFile Id="RemoveSteamExporters" Name="*" On="uninstall" />
+                  <RemoveFolder Id="RemoveSteamExportersFolder" On="uninstall" />
+                </Component>
+              </Directory>
+              <Directory Id="XboxExportersFolder" Name="xbox">
+                <Component Id="XboxExporters" Guid="{21FCDCD4-808C-4B39-9314-B6F1E3FC567A}">
+                  <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="XboxExporters" Type="integer" Value="1" KeyPath="yes" />
+                  <File Id="XboxMp" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\xbox\top250_mp.ps1" />
+                  <File Id="XboxBr" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\xbox\top250_br.ps1" />
+                  <File Id="XboxResurgence" Source="$(var.ProjectDir)..\dist\portable\engine\exporters\xbox\top250_resurgence.ps1" />
+                  <RemoveFile Id="RemoveXboxExporters" Name="*" On="uninstall" />
+                  <RemoveFolder Id="RemoveXboxExportersFolder" On="uninstall" />
+                </Component>
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="CODMunity Top 250 Collector" Level="1">
+      <ComponentRef Id="ProgramsFolderCleanup" />
+      <ComponentRef Id="ApplicationFiles" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="AssetsFiles" />
+      <ComponentRef Id="EngineRootFiles" />
+      <ComponentRef Id="ExportersFolderCleanup" />
+      <ComponentRef Id="BnetDynamicExporter" />
+      <ComponentRef Id="BnetExporters" />
+      <ComponentRef Id="Bnet20260814Exporters" />
+      <ComponentRef Id="SteamExporters" />
+      <ComponentRef Id="XboxExporters" />
+    </Feature>
+
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="BrowseDlg" />
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="DiskCostDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="ExitDialog" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="InstallDirDlg" />
+      <DialogRef Id="InvalidDirDlg" />
+      <DialogRef Id="MaintenanceTypeDlg" />
+      <DialogRef Id="MaintenanceWelcomeDlg" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="OutOfDiskDlg" />
+      <DialogRef Id="OutOfRbDiskDlg" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="VerifyReadyDlg" />
+      <DialogRef Id="WaitForCostingDlg" />
+      <DialogRef Id="WelcomeDlg" />
+
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="20" Y="20" Width="300" Height="24" Text="{\WixUI_Font_Title}Options" />
+        <Control Id="Description" Type="Text" X="20" Y="60" Width="330" Height="32" Text="Choose the optional shortcut for CODMunity Top 250 Collector." />
+        <Control Id="DesktopShortcutCheckbox" Type="CheckBox" X="20" Y="105" Width="330" Height="18" Property="DESKTOP_SHORTCUT" CheckBoxValue="1" Text="Create a desktop shortcut" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" Condition="1" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Condition="1" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" Condition="1" />
+        </Control>
+      </Dialog>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" Condition="1" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="1" Condition="Installed AND PATCH" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="1" Condition="1" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="CheckTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1" Condition="1" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="3" Condition="1" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="OptionsDlg" Order="4" Condition="1" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Event="ChangeFolder" Value="[_BrowseProperty]" Order="1" Condition="1" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" Condition="1" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SetTargetPath" Value="[_BrowseProperty]" Order="3" Condition="1" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="EndDialog" Value="Return" Order="4" Condition="1" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" Order="1" Condition="1" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" Order="1" Condition="1" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" Order="1" Condition="1" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" Order="1" Condition="1" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchCollector" Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT WIX_UPGRADE_DETECTED AND UILevel &gt;= 4" />
+    </UI>
+
+    <InstallUISequence>
+      <Show Dialog="override PrepareDlg" Before="AppSearch" />
+      <Show Dialog="override WelcomeDlg" Before="ProgressDlg" Condition="NOT Installed OR PATCH" />
+      <Show Dialog="override MaintenanceWelcomeDlg" Before="ProgressDlg" Condition="Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH" />
+      <Show Dialog="override ResumeDlg" Before="ProgressDlg" Condition="Installed AND (RESUME OR Preselected)" />
+      <Show Dialog="override ProgressDlg" Before="ExecuteAction" />
+      <Show Dialog="override UserExit" OnExit="cancel" />
+      <Show Dialog="override FatalError" OnExit="error" />
+      <Show Dialog="override ExitDialog" OnExit="success" />
+    </InstallUISequence>
+    <AdminUISequence>
+      <Show Dialog="override UserExit" OnExit="cancel" />
+      <Show Dialog="override FatalError" OnExit="error" />
+      <Show Dialog="override ExitDialog" OnExit="success" />
+    </AdminUISequence>
+  </Package>
+</Wix>

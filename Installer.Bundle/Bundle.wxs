@@ -1,0 +1,50 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:netfx="http://wixtoolset.org/schemas/v4/wxs/netfx">
+  <Bundle Name="CODMunity Top 250 Collector"
+          Manufacturer="CODMunity"
+        Version="0.1.18"
+          UpgradeCode="{4D7781F4-570A-42A4-9378-F1D97C01B4C3}"
+          IconSourceFile="$(var.ProjectDir)..\CODMunityTop250Collector.App\Assets\codmunity-logo.ico">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"
+                                                LicenseUrl=""
+                                                ThemeFile="$(var.ProjectDir)Assets\CODMunityTheme.xml"
+                                                LocalizationFile="$(var.ProjectDir)Assets\CODMunityTheme.wxl"
+                                                LogoFile="$(var.ProjectDir)..\CODMunityTop250Collector.App\Assets\codmunity-logo.png"
+                                                LaunchTarget="[LocalAppDataFolder]Programs\CODMunity Top 250 Collector\CODMunityTop250Collector.exe"
+                                                LaunchWorkingFolder="[LocalAppDataFolder]Programs\CODMunity Top 250 Collector" />
+    </BootstrapperApplication>
+
+    <netfx:DotNetCoreSearch Id="DotNetDesktopRuntime8X64"
+                            Variable="DOTNET_DESKTOP_RUNTIME_8_X64"
+                            RuntimeType="desktop"
+                            Platform="x64"
+                            MajorVersion="8" />
+
+    <Chain>
+      <ExePackage Id="DotNetDesktopRuntime8X64Package"
+                  DisplayName="Microsoft .NET 8 Desktop Runtime (x64)"
+                  Description="Required to run CODMunity Top 250 Collector."
+                  DetectCondition="DOTNET_DESKTOP_RUNTIME_8_X64"
+                  InstallArguments="/install /quiet /norestart"
+                  RepairArguments="/repair /quiet /norestart"
+                  PerMachine="yes"
+                  Permanent="yes"
+                  Cache="remove"
+                  Protocol="burn"
+                  Vital="yes">
+        <ExePackagePayload Id="DotNetDesktopRuntime8X64Payload"
+                           Name="windowsdesktop-runtime-8.0.29-win-x64.exe"
+                           DownloadUrl="https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.29/windowsdesktop-runtime-8.0.29-win-x64.exe"
+                           Hash="02D272EE678F5BC8BE522B0B8ADAF2A3C9D35D1044D7737EA48E477928A839AD5344724B242B210AFDC64775D8CF43655DB58396FCF53DD185E23BA2B888EC44"
+                           Size="58699856"
+                           Version="8.0.29"
+                           ProductName="Microsoft .NET 8 Desktop Runtime (x64)" />
+      </ExePackage>
+      <MsiPackage Id="CODMunityTop250CollectorMsi"
+                  SourceFile="$(var.ProjectDir)..\dist\msi\CODMunityTop250Collector-0.1.18-alpha-win-x64.msi"
+                  Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

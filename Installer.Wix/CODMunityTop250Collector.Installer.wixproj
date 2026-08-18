@@ -1,0 +1,12 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>CODMunityTop250Collector-0.1.18-alpha-win-x64</OutputName>
+    <OutputPath>$(MSBuildProjectDirectory)\..\dist\msi\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Netfx.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>

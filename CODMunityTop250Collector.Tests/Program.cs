@@ -1,0 +1,532 @@
+using CODMunityTop250Collector.Core;
+using CODMunityTop250Collector.ReleaseTool;
+using CODMunityTop250Collector.App;
+using CODMunityTop250Collector.UpdateHost;
+using CODMunityTop250Collector.Updater;
+using ReleaseManifest = CODMunityTop250Collector.ReleaseTool.ReleaseManifest;
+using ManifestJson = CODMunityTop250Collector.ReleaseTool.ManifestJson;
+using System.Globalization;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+var root = Path.Combine(Path.GetTempPath(), "CODMunityTop250CollectorTests", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); CollectorPaths.RootOverride = root;
+try
+{
+    var log = new AppLogger(); var parser = new EngineStatusParser(); var store = new SettingsStore(log);
+    store.Save(new CollectorSettings(false, true)); if (store.Load() != new CollectorSettings(false, true)) throw new Exception("settings load/save");
+    File.WriteAllText(CollectorPaths.Settings, "{\"CollectorEnabled\":true,\"StartWithWindows\":false,\"HistoryRetentionDays\":7}");
+    if (store.Load() != new CollectorSettings(true, false)) throw new Exception("legacy settings compatibility");
+    File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
+    var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
+    var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY") throw new Exception("status parsing");
+    var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
+    var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
+    var ptBr = CultureInfo.GetCultureInfo("pt-BR");
+    var enUs = CultureInfo.GetCultureInfo("en-US");
+    var ptBrStatus = localHydratedTime.ToString("G", ptBr);
+    var enUsStatus = localHydratedTime.ToString("G", enUs);
+    var ptBrCard = localHydratedTime.ToString("g", ptBr);
+    if (!ptBrStatus.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrStatus.Contains(localHydratedTime.ToString("T", ptBr)) || !enUsStatus.Contains(localHydratedTime.ToString("d", enUs)) || !enUsStatus.Contains(localHydratedTime.ToString("T", enUs)) || !ptBrCard.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrCard.Contains(localHydratedTime.ToString("t", ptBr))) throw new Exception("localized timestamp formatting");
+    ReleaseSigningTests(root);
+    PrivateUpdaterTests(root);
+    AutomaticUpdateTests(root);
+    File.WriteAllBytes(Path.Combine(CollectorPaths.Logs, "app.log"), new byte[5 * 1024 * 1024]); log.Write("TEST"); if (!File.Exists(Path.Combine(CollectorPaths.Logs, "app.1.log"))) throw new Exception("log rotation");
+    ApiSyncTests(log).GetAwaiter().GetResult();
+    UnicodeMachineReadableTransportTests();
+    BuildIdentityCacheTests(log).GetAwaiter().GetResult();
+    SchedulerBuildIdentityIntegrationTests(log).GetAwaiter().GetResult();
+    SchedulerApiPriorityTests(log).GetAwaiter().GetResult();
+    EngineManagedIdentityContractTests();
+    Console.WriteLine("PASS settings compatibility, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
+}
+finally { CollectorPaths.RootOverride = null; Directory.Delete(root, true); }
+
+static async Task ApiSyncTests(AppLogger log)
+{
+    var rows = Enumerable.Range(1, 250).Select(i => new RankedPlayer(i, 30000 - i, "player-" + i)).ToArray();
+    if (!RankedPlayersApiClient.TryValidateNativeLeaderboard(rows, out _, out _)) throw new Exception("valid native leaderboard rejected");
+    var tiesA = rows.Select((row, i) => i == 2 ? row with { Position = 2, Sr = rows[1].Sr } : row).ToArray(); // 1, 2, 2, 4, 5...
+    var tiesB = rows.Select((row, i) => i == 3 ? row with { Position = 3, Sr = rows[2].Sr } : i == 4 ? row with { Position = 5 } : row).ToArray(); // 1, 2, 3, 3, 5...
+    var multipleTies = rows.Select((row, i) => i is 3 or 4 ? row with { Position = 3, Sr = rows[2].Sr } : i == 5 ? row with { Position = 6 } : row).ToArray();
+    var tiesAtObservedRanks = rows.Select((row, i) => i switch
+    {
+        50 => row with { Position = 50, Sr = rows[49].Sr },  // tie at ordinal 51; rank 51 is legitimately skipped
+        128 => row with { Position = 128, Sr = rows[127].Sr },
+        136 => row with { Position = 136, Sr = rows[135].Sr },
+        193 => row with { Position = 193, Sr = rows[192].Sr },
+        248 => row with { Position = 248, Sr = rows[247].Sr },
+        _ => row
+    }).ToArray();
+    foreach (var tied in new[] { tiesA, tiesB, multipleTies, tiesAtObservedRanks })
+        if (!RankedPlayersApiClient.TryValidateNativeLeaderboard(tied, out _, out _)) throw new Exception("valid COD tie ranking rejected");
+    var ordinalPayload = RankedPlayersApiClient.MapToApiOrdinalPositions(tiesAtObservedRanks);
+    if (!RankedPlayersApiClient.TryValidateApiRequestPlayers(ordinalPayload, out _, out _) || ordinalPayload.Select(p => p.Position).Distinct().Count() != 250 || !ordinalPayload.Select(p => p.Position).SequenceEqual(Enumerable.Range(1, 250))) throw new Exception("tied native ranks were not mapped to API ordinals");
+    if (RankedPlayersApiClient.TryValidateApiRequestPlayers(tiesAtObservedRanks, out _, out _)) throw new Exception("native tied ranks accepted as API slots");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 0 ? p with { Position = 0 } : p), out _, out _)) throw new Exception("position zero accepted");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 249 ? p with { Position = 251 } : p), out _, out _)) throw new Exception("position 251 accepted");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Position = -1 } : p), out _, out _)) throw new Exception("negative position accepted");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Sr = 0 } : p), out _, out _)) throw new Exception("nonpositive SR accepted");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Name = " " } : p), out _, out _)) throw new Exception("empty name accepted");
+    if (RankedPlayersApiClient.TryValidatePlayers(rows.Take(249), out _, out _) || RankedPlayersApiClient.TryValidatePlayers(rows.Append(new RankedPlayer(250, 1, "extra")), out _, out _)) throw new Exception("invalid player count accepted");
+    var handler = new RecordingHandler([HttpStatusCode.InternalServerError, HttpStatusCode.OK]);
+    using var client = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, handler);
+    var result = await client.SyncAsync("mp", rows, CancellationToken.None);
+    if (result.State != ApiSyncState.Ok || handler.Calls != 2 || handler.Body?.Contains("xuid", StringComparison.OrdinalIgnoreCase) == true || handler.Authorization != "Bearer synthetic-token") throw new Exception("API retry/payload safety");
+    using var modes = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, new RecordingHandler([HttpStatusCode.Created, HttpStatusCode.Accepted, HttpStatusCode.NoContent]));
+    foreach (var mode in new[] { "mp", "br", "resurgence" }) if ((await modes.SyncAsync(mode, rows, CancellationToken.None)).State != ApiSyncState.Ok) throw new Exception("API mode/2xx handling");
+    var tiedHandler = new RecordingHandler([HttpStatusCode.OK]);
+    using var tiedClient = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, tiedHandler);
+    if ((await tiedClient.SyncAsync("resurgence", tiesB, CancellationToken.None)).State != ApiSyncState.Ok) throw new Exception("tied ranking did not reach API client");
+    AssertOrdinalApiPayload(tiedHandler.Body);
+    var runtimeFirst = new CompositeApiTokenProvider(new StaticTokenProvider("runtime-token"), new StaticTokenProvider("embedded-token"));
+    var embeddedFallback = new CompositeApiTokenProvider(new StaticTokenProvider(" "), new StaticTokenProvider("embedded-token"));
+    if (runtimeFirst.GetToken() != "runtime-token" || embeddedFallback.GetToken() != "embedded-token") throw new Exception("token provider priority");
+    using var unconfigured = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
+    if ((await unconfigured.SyncAsync("br", rows, CancellationToken.None)).State != ApiSyncState.NotConfigured) throw new Exception("missing API token");
+}
+
+static async Task BuildIdentityCacheTests(AppLogger log)
+{
+    const string sha = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    var hasher = new CountingBuildHasher(sha);
+    var cache = new BuildIdentityCache(hasher, log);
+    var stamp = DateTime.UnixEpoch;
+    var bnet = new CodProcessDescriptor(1234, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 100, stamp);
+    for (var cycle = 0; cycle < 3; cycle++)
+        if ((await cache.GetOrCreateAsync(bnet, CancellationToken.None))?.Sha256 != sha) throw new Exception("build identity cache result");
+    if (hasher.Calls != 1) throw new Exception("three same-PID Battle.net cycles must hash exactly once");
+    var cacheLog = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
+    if (Count(cacheLog, "BUILD_IDENTITY_CACHE_MISS pid=1234 platform=battlenet") != 1 ||
+        Count(cacheLog, "BUILD_HASH_START pid=1234") != 1 ||
+        Count(cacheLog, "BUILD_HASH_OK pid=1234") != 1 ||
+        Count(cacheLog, "BUILD_IDENTITY_CACHE_HIT pid=1234 platform=battlenet") != 2)
+        throw new Exception("build identity cache logging sequence");
+    var pathChanged = bnet with { Path = @"D:\Games\Call of Duty\_retail_\cod.exe" };
+    await cache.GetOrCreateAsync(pathChanged, CancellationToken.None);
+    var platformChanged = pathChanged with { Platform = "steam" };
+    await cache.GetOrCreateAsync(platformChanged, CancellationToken.None);
+    var pidChanged = platformChanged with { Pid = 5678 };
+    await cache.GetOrCreateAsync(pidChanged, CancellationToken.None);
+    if (hasher.Calls != 4) throw new Exception("PID/path/platform changes must invalidate build identity");
+    cache.RememberValidatedLayout((await cache.GetOrCreateAsync(pidChanged, CancellationToken.None))!, "bnet-current");
+    if ((await cache.GetOrCreateAsync(pidChanged, CancellationToken.None))?.Layout != "bnet-current") throw new Exception("validated layout cache");
+    cache.Invalidate("process-closed");
+    await cache.GetOrCreateAsync(pidChanged, CancellationToken.None);
+    if (hasher.Calls != 5) throw new Exception("closed process invalidation");
+    if (await cache.GetOrCreateAsync(pidChanged with { Platform = "xbox" }, CancellationToken.None) is not null || hasher.Calls != 5) throw new Exception("Xbox must not use file SHA cache");
+}
+
+static int Count(string value, string needle) => value.Split(needle, StringSplitOptions.None).Length - 1;
+
+static void UnicodeMachineReadableTransportTests()
+{
+    var names = new[] { "@JUANツ", "VØLNKRIX", "神 MOUSTAKIY 神", "乂 RiQeu 乂", "Pilot🚀", "Игрок", "東京" };
+    foreach (var name in names)
+    {
+        var field = new byte[64];
+        var bytes = Encoding.UTF8.GetBytes(name);
+        Array.Copy(bytes, field, bytes.Length);
+        var terminator = Array.IndexOf(field, (byte)0);
+        if (!string.Equals(Encoding.UTF8.GetString(field, 0, terminator), name, StringComparison.Ordinal)) throw new Exception("UTF-8 name field decoding");
+    }
+
+    var child = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    var command = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $n=@(('@JUAN'+[char]0x30C4),('V'+[char]0x00D8+'LNKRIX'),([char]0x795E+' MOUSTAKIY '+[char]0x795E),([char]0x4E42+' RiQeu '+[char]0x4E42),('Pilot'+[char]0xD83D+[char]0xDE80),([char]0x0418+[char]0x0433+[char]0x0440+[char]0x043E+[char]0x043A),([char]0x6771+[char]0x4EAC)); [Console]::Out.Write(([ordered]@{names=$n}|ConvertTo-Json -Compress))";
+    var psi = new ProcessStartInfo(child)
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+        StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+    };
+    foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", command }) psi.ArgumentList.Add(argument);
+    using var process = Process.Start(psi) ?? throw new Exception("Unicode PowerShell child did not start");
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    if (process.ExitCode != 0 || !string.IsNullOrEmpty(stderr)) throw new Exception("Unicode PowerShell child failed");
+    using var childJson = JsonDocument.Parse(stdout);
+    var received = childJson.RootElement.GetProperty("names").EnumerateArray().Select(value => value.GetString()).ToArray();
+    if (!received.SequenceEqual(names)) throw new Exception("PowerShell redirected UTF-8 JSON transport");
+
+    var apiJson = JsonSerializer.Serialize(new { players = received.Select((name, index) => new RankedPlayer(index + 1, 1000 + index, name!)) });
+    using var apiDocument = JsonDocument.Parse(apiJson);
+    var finalNames = apiDocument.RootElement.GetProperty("players").EnumerateArray().Select(player => player.GetProperty("Name").GetString()).ToArray();
+    if (!finalNames.SequenceEqual(names)) throw new Exception("Core/API Unicode JSON transport");
+
+    var engine = Path.Combine(AppContext.BaseDirectory, "engine");
+    var orchestrator = File.ReadAllText(Path.Combine(engine, "top250_orchestrator.ps1"));
+    if (!orchestrator.Contains("[Console]::OutputEncoding = $script:MachineReadableUtf8", StringComparison.Ordinal) || !orchestrator.Contains("$psi.StandardOutputEncoding", StringComparison.Ordinal)) throw new Exception("orchestrator UTF-8 transport contract");
+    foreach (var exporter in Directory.EnumerateFiles(Path.Combine(engine, "exporters"), "*.ps1", SearchOption.AllDirectories))
+        if (!File.ReadAllText(exporter).Contains("[Console]::OutputEncoding = $script:MachineReadableUtf8", StringComparison.Ordinal)) throw new Exception($"exporter UTF-8 transport contract: {exporter}");
+}
+
+static void EngineManagedIdentityContractTests()
+{
+    var engine = Path.Combine(AppContext.BaseDirectory, "engine");
+    var orchestrator = File.ReadAllText(Path.Combine(engine, "top250_orchestrator.ps1"));
+    if (!orchestrator.Contains("-VerifiedBuildSha256", StringComparison.Ordinal) || !orchestrator.Contains("ProcessPriorityClass]::BelowNormal", StringComparison.Ordinal)) throw new Exception("managed engine identity or exporter priority contract");
+    foreach (var exporter in new[]
+    {
+        "exporters/bnet/top250_mp.ps1", "exporters/bnet/top250_br.ps1", "exporters/bnet/top250_resurgence.ps1",
+        "exporters/bnet-20260814/top250_mp.ps1", "exporters/bnet-20260814/top250_br.ps1", "exporters/bnet-20260814/top250_resurgence.ps1",
+        "exporters/steam/top250_mp.ps1", "exporters/steam/top250_br.ps1", "exporters/steam/top250_resurgence.ps1",
+        "exporters/top250_bnet_dynamic_layout.ps1"
+    })
+    {
+        var source = File.ReadAllText(Path.Combine(engine, exporter.Replace('/', Path.DirectorySeparatorChar)));
+        if (!source.Contains("VerifiedBuildSha256", StringComparison.Ordinal) || !source.Contains("IsNullOrWhiteSpace($VerifiedBuildSha256)", StringComparison.Ordinal)) throw new Exception($"managed identity fallback missing: {exporter}");
+    }
+}
+
+static async Task SchedulerBuildIdentityIntegrationTests(AppLogger log)
+{
+    const string sha = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+    var hasher = new CountingBuildHasher(sha);
+    var cache = new BuildIdentityCache(hasher, log);
+    var monitor = new FakeCodProcessMonitor(new CodProcessDescriptor(4321, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch));
+    var runner = new FakeEngineRunner(log);
+    using var api = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
+    var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, cache);
+    for (var cycle = 0; cycle < 3; cycle++) await scheduler.SyncNowAsync(CancellationToken.None);
+    if (hasher.Calls != 1 || runner.Identities.Count != 3 || runner.Identities.Any(identity => identity?.Sha256 != sha)) throw new Exception("scheduler production composition did not reuse verified build identity");
+    var content = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
+    if (Count(content, "BUILD_IDENTITY_CACHE_MISS pid=4321 platform=battlenet") != 1 || Count(content, "BUILD_HASH_START pid=4321") != 1 || Count(content, "BUILD_HASH_OK pid=4321") != 1 || Count(content, "BUILD_IDENTITY_CACHE_HIT pid=4321 platform=battlenet") != 2) throw new Exception("scheduler production composition logging");
+}
+
+static async Task SchedulerApiPriorityTests(AppLogger log)
+{
+    var descriptor = new CodProcessDescriptor(9876, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch);
+    var monitor = new FakeCodProcessMonitor(descriptor);
+    var runner = new PriorityEngineRunner(log);
+    var successHandler = new RecordingHandler([HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.OK]);
+    using (var api = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, successHandler))
+    {
+        var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(new string('A', 64)), log));
+        await scheduler.SyncNowAsync(CancellationToken.None);
+        if (!successHandler.Modes.SequenceEqual(["resurgence", "mp", "br"])) throw new Exception("API mode priority order");
+        if (scheduler.Snapshot.Resurgence?.ApiSync != ApiSyncState.Ok || scheduler.Snapshot.Mp?.ApiSync != ApiSyncState.Ok || scheduler.Snapshot.Br?.ApiSync != ApiSyncState.Ok) throw new Exception("independent API sync statuses");
+    }
+    var failureHandler = new RecordingHandler([HttpStatusCode.BadRequest, HttpStatusCode.OK, HttpStatusCode.OK]);
+    using (var api = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, failureHandler))
+    {
+        var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(new string('B', 64)), log));
+        await scheduler.SyncNowAsync(CancellationToken.None);
+        if (!failureHandler.Modes.SequenceEqual(["resurgence", "mp", "br"])) throw new Exception("Resurgence failure blocked lower-priority modes");
+        if (scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.Resurgence?.ApiSync != ApiSyncState.Failed || scheduler.Snapshot.Mp?.ApiSync != ApiSyncState.Ok || scheduler.Snapshot.Br?.ApiSync != ApiSyncState.Ok) throw new Exception("API failure changed collection result or independent statuses");
+    }
+}
+
+static void AssertOrdinalApiPayload(string? body)
+{
+    using var json = JsonDocument.Parse(body ?? throw new Exception("missing API payload"));
+    var players = json.RootElement.GetProperty("players");
+    if (players.GetArrayLength() != 250) throw new Exception("API payload player count");
+    for (var index = 0; index < 250; index++)
+    {
+        var player = players[index];
+        if (player.GetProperty("position").GetInt32() != index + 1) throw new Exception("API payload position is not ordinal");
+        if (player.TryGetProperty("nativeRank", out _) || player.TryGetProperty("ordinal", out _) || player.TryGetProperty("xuid", out _)) throw new Exception("internal rank data leaked into API payload");
+    }
+}
+
+static void ReleaseSigningTests(string root)
+{
+    var signingRoot = Path.Combine(root, "release-signing"); Directory.CreateDirectory(signingRoot);
+    var msiPath = Path.Combine(signingRoot, "fixture.msi");
+    File.WriteAllBytes(msiPath, RandomNumberGenerator.GetBytes(4096));
+    var passphrase = "temporary-passphrase".ToCharArray();
+    var wrongPassphrase = "wrong-passphrase".ToCharArray();
+    var keyDirectory = Path.Combine(signingRoot, "keypair");
+    ReleaseSigning.WriteKeyPair(keyDirectory, passphrase, force: false);
+    var generatedPrivatePath = Path.Combine(keyDirectory, "codmunity-top250-release-private.pem");
+    var generatedPublicPath = Path.Combine(keyDirectory, "codmunity-top250-release-public.pem");
+    if (!File.Exists(generatedPrivatePath) || !File.Exists(generatedPublicPath)) throw new Exception("temporary keypair generation");
+    using (var generatedKey = ReleaseSigning.LoadEncryptedPrivateKey(generatedPrivatePath, passphrase)) { }
+    ExpectFailure(() => ReleaseSigning.WriteKeyPair(keyDirectory, passphrase, force: false), "keypair overwrite accepted without force");
+    using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var encryptedPrivate = ReleaseSigning.ExportEncryptedPrivateKey(key, passphrase);
+    using var importedKey = ReleaseSigning.ImportEncryptedPrivateKey(encryptedPrivate, passphrase);
+    try { using var _ = ReleaseSigning.ImportEncryptedPrivateKey(encryptedPrivate, wrongPassphrase); throw new Exception("wrong private-key passphrase accepted"); }
+    catch (CryptographicException) { }
+    var publicDer = key.ExportSubjectPublicKeyInfo();
+    var fingerprint = ReleaseSigning.PublicKeyFingerprint(publicDer);
+    if (fingerprint != ReleaseSigning.PublicKeyFingerprint(publicDer)) throw new Exception("public key fingerprint instability");
+    var manifest = new ReleaseManifest
+    {
+        Channel = "private-alpha", Version = "0.1.5-alpha", MsiVersion = "0.1.5", MinimumUpdaterVersion = "0.1.4-alpha",
+        Url = "https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Freleases%2Ffixture.msi", Sha256 = Convert.ToHexString(ReleaseSigning.ComputeSha256(msiPath)),
+        Size = new FileInfo(msiPath).Length, PublishedAtUtc = new DateTimeOffset(2026, 8, 17, 0, 0, 0, TimeSpan.Zero), ReleaseNotes = "Synthetic test release."
+    };
+    var manifestBytes = ManifestJson.Serialize(manifest);
+    var signature = ReleaseSigning.SignManifest(importedKey, manifestBytes);
+    using var publicKey = ECDsa.Create(); publicKey.ImportSubjectPublicKeyInfo(publicDer, out _);
+    if (!ReleaseSigning.VerifyManifest(publicKey, manifestBytes, signature)) throw new Exception("valid manifest signature rejected");
+    var alteredManifest = (byte[])manifestBytes.Clone(); alteredManifest[0] ^= 0x01;
+    if (ReleaseSigning.VerifyManifest(publicKey, alteredManifest, signature)) throw new Exception("altered manifest signature accepted");
+    var wrongSignature = (byte[])signature.Clone(); wrongSignature[0] ^= 0x01;
+    if (ReleaseSigning.VerifyManifest(publicKey, manifestBytes, wrongSignature)) throw new Exception("altered signature accepted");
+    using var wrongKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    if (ReleaseSigning.VerifyManifest(wrongKey, manifestBytes, signature)) throw new Exception("wrong public key accepted");
+    var manifestPath = Path.Combine(signingRoot, "manifest.json");
+    var signaturePath = Path.Combine(signingRoot, "manifest.sig");
+    var publicPath = Path.Combine(signingRoot, "public.pem");
+    var signedOutput = Path.Combine(signingRoot, "signed-output");
+    ReleaseSigning.WriteManifestAndSignature(signedOutput, manifest, importedKey, force: false);
+    File.WriteAllText(Path.Combine(signedOutput, "public.pem"), new string(PemEncoding.Write("PUBLIC KEY", publicDer)));
+    ReleaseSigning.VerifyReleaseFiles(Path.Combine(signedOutput, "manifest.json"), Path.Combine(signedOutput, "manifest.sig"), Path.Combine(signedOutput, "public.pem"), msiPath);
+    File.WriteAllBytes(manifestPath, manifestBytes);
+    File.WriteAllText(signaturePath, Convert.ToBase64String(signature) + "\n");
+    File.WriteAllText(publicPath, new string(PemEncoding.Write("PUBLIC KEY", publicDer)));
+    ReleaseSigning.VerifyReleaseFiles(manifestPath, signaturePath, publicPath, msiPath);
+    var sizeMismatch = manifest with { Size = manifest.Size + 1 };
+    var sizeMismatchBytes = ManifestJson.Serialize(sizeMismatch);
+    var sizeMismatchSignature = ReleaseSigning.SignManifest(importedKey, sizeMismatchBytes);
+    var sizeManifestPath = Path.Combine(signingRoot, "size-mismatch.json");
+    var sizeSignaturePath = Path.Combine(signingRoot, "size-mismatch.sig");
+    File.WriteAllBytes(sizeManifestPath, sizeMismatchBytes); File.WriteAllText(sizeSignaturePath, Convert.ToBase64String(sizeMismatchSignature));
+    ExpectFailure(() => ReleaseSigning.VerifyReleaseFiles(sizeManifestPath, sizeSignaturePath, publicPath, msiPath), "size mismatch accepted");
+    File.AppendAllText(msiPath, "x");
+    ExpectFailure(() => ReleaseSigning.VerifyReleaseFiles(manifestPath, signaturePath, publicPath, msiPath), "altered MSI accepted");
+    ExpectFailure(() => ManifestJson.Serialize(manifest with { Url = "http://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Freleases%2Ffixture.msi" }), "HTTP release URL accepted");
+    Array.Clear(passphrase); Array.Clear(wrongPassphrase);
+    CryptographicOperations.ZeroMemory(encryptedPrivate); CryptographicOperations.ZeroMemory(publicDer); CryptographicOperations.ZeroMemory(manifestBytes); CryptographicOperations.ZeroMemory(signature); CryptographicOperations.ZeroMemory(alteredManifest); CryptographicOperations.ZeroMemory(wrongSignature); CryptographicOperations.ZeroMemory(sizeMismatchBytes); CryptographicOperations.ZeroMemory(sizeMismatchSignature);
+}
+
+static void ExpectFailure(Action action, string message)
+{
+    try { action(); }
+    catch (Exception) { return; }
+    throw new Exception(message);
+}
+
+static void PrivateUpdaterTests(string root)
+{
+    var embedded = EmbeddedUpdateKey.LoadSubjectPublicKeyInfo();
+    try
+    {
+        if (UpdateTrust.PublicKeyFingerprint(embedded) != UpdateTrust.ExpectedPublicKeyFingerprint) throw new Exception("embedded production public-key fingerprint");
+    }
+    finally { CryptographicOperations.ZeroMemory(embedded); }
+
+    using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var publicDer = signer.ExportSubjectPublicKeyInfo();
+    var expectedFingerprint = UpdateTrust.PublicKeyFingerprint(publicDer);
+    var payload = RandomNumberGenerator.GetBytes(4096);
+    var sha = Convert.ToHexString(SHA256.HashData(payload));
+    const string validMsiUrl = "https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Freleases%2FCODMunityTop250Collector-0.1.5-alpha-win-x64.msi";
+    const string expectedManifestEndpoint = "https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Fmanifest.json";
+    const string expectedSignatureEndpoint = "https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Fmanifest.sig";
+    if (UpdateTrust.ManifestUri.AbsoluteUri != expectedManifestEndpoint || UpdateTrust.SignatureUri.AbsoluteUri != expectedSignatureEndpoint) throw new Exception("OCI fixed endpoints");
+    var manifest = new UpdateManifest(1, "private-alpha", "0.1.5-alpha", "0.1.5", "0.1.4-alpha", validMsiUrl, sha, payload.Length, new DateTimeOffset(2026, 8, 17, 0, 0, 0, TimeSpan.Zero), "Synthetic release.");
+    var manifestBytes = SerializeUpdateManifest(manifest);
+    var signature = signer.SignData(manifestBytes, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    using var publicKey = UpdateTrust.ImportPublicKey(publicDer);
+    if (!UpdateTrust.VerifyManifest(publicKey, manifestBytes, signature)) throw new Exception("valid update signature rejected");
+    var changed = (byte[])manifestBytes.Clone(); changed[0] ^= 1; if (UpdateTrust.VerifyManifest(publicKey, changed, signature)) throw new Exception("changed update manifest accepted");
+    var wrongSignature = (byte[])signature.Clone(); wrongSignature[0] ^= 1; if (UpdateTrust.VerifyManifest(publicKey, manifestBytes, wrongSignature)) throw new Exception("wrong update signature accepted");
+    using var wrongPublicKey = ECDsa.Create(ECCurve.NamedCurves.nistP256); if (UpdateTrust.VerifyManifest(wrongPublicKey, manifestBytes, signature)) throw new Exception("wrong update public key accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { SchemaVersion = 2 }), "unknown schema accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Channel = "public" }), "wrong channel accepted");
+    UpdateManifestValidator.Validate(manifest);
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("https://", "http://", StringComparison.Ordinal) }), "HTTP URL accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com", "codmunity-top250.duckdns.org", StringComparison.Ordinal) }), "DuckDNS host accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("/n/gr5favu0uzxf/", "/n/othernamespace/", StringComparison.Ordinal) }), "wrong OCI namespace accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("/b/codmunity-updates/", "/b/other-bucket/", StringComparison.Ordinal) }), "wrong OCI bucket accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("top250%2Freleases%2F", "top250%2Fother%2F", StringComparison.Ordinal) }), "foreign OCI prefix accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url + "?query=1" }), "query accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url + "#fragment" }), "fragment accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("https://", "https://user:password@", StringComparison.Ordinal) }), "credentials accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace(".com/", ".com:444/", StringComparison.Ordinal) }), "custom port accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("top250%2Freleases%2F", "top250%252Freleases%252F", StringComparison.Ordinal) }), "double encoding accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Url = manifest.Url.Replace("releases%2F", "releases%2F..%2F", StringComparison.Ordinal) }), "traversal accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Sha256 = "ABC" }), "invalid SHA accepted");
+    ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Size = UpdateTrust.MaxMsiBytes + 1 }), "oversized MSI accepted");
+    if (!AppSemanticVersion.TryParse("0.1.5-alpha", out var newer) || !AppSemanticVersion.TryParse("0.1.4-alpha", out var current) || newer.CompareTo(current) <= 0 || !AppSemanticVersion.TryParse("0.2.0-alpha", out var majorMinor) || !AppSemanticVersion.TryParse("0.1.99-alpha", out var oldMinor) || majorMinor.CompareTo(oldMinor) <= 0) throw new Exception("semantic version comparison");
+    var handler = new FakeHandler(request =>
+    {
+        var address = request.RequestUri!.AbsoluteUri;
+        if (address == UpdateTrust.ManifestUri.AbsoluteUri) return FakeResponse(manifestBytes);
+        if (address == UpdateTrust.SignatureUri.AbsoluteUri) return FakeResponse(Encoding.ASCII.GetBytes(Convert.ToBase64String(signature)));
+        if (address == manifest.Url) return FakeResponse(payload);
+        return new HttpResponseMessage(HttpStatusCode.NotFound) { RequestMessage = request };
+    });
+    using var client = new PrivateUpdateClient(publicDer, (_, _) => { }, handler, expectedFingerprint);
+    var available = client.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult();
+    if (available.Kind != UpdateCheckKind.Available || available.Update is null) throw new Exception("newer signed update not detected");
+    var sameHandler = CreateUpdateHandler(signer, publicDer, manifest with { Version = "0.1.4-alpha" }, payload);
+    using (var sameClient = new PrivateUpdateClient(publicDer, (_, _) => { }, sameHandler, expectedFingerprint)) if (sameClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None) throw new Exception("same version offered");
+    var olderHandler = CreateUpdateHandler(signer, publicDer, manifest with { Version = "0.1.3-alpha" }, payload);
+    using (var olderClient = new PrivateUpdateClient(publicDer, (_, _) => { }, olderHandler, expectedFingerprint)) if (olderClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None) throw new Exception("older version offered");
+    var minimumHandler = CreateUpdateHandler(signer, publicDer, manifest with { MinimumUpdaterVersion = "0.1.5-alpha" }, payload);
+    using (var minimumClient = new PrivateUpdateClient(publicDer, (_, _) => { }, minimumHandler, expectedFingerprint)) if (minimumClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.MinimumUpdaterVersionNotMet) throw new Exception("minimum updater version ignored");
+    var updatesDirectory = Path.Combine(root, "updates");
+    var downloaded = client.DownloadMsiAsync(available.Update, updatesDirectory, CancellationToken.None).GetAwaiter().GetResult();
+    if (!File.ReadAllBytes(downloaded).SequenceEqual(payload)) throw new Exception("valid MSI download mismatch");
+    ExpectFailure(() => client.DownloadMsiAsync(available.Update with { Manifest = manifest with { Sha256 = new string('A', 64) } }, updatesDirectory, CancellationToken.None).GetAwaiter().GetResult(), "invalid MSI hash accepted");
+    ExpectFailure(() => client.DownloadMsiAsync(available.Update with { Manifest = manifest with { Size = payload.Length + 1 } }, updatesDirectory, CancellationToken.None).GetAwaiter().GetResult(), "invalid MSI size accepted");
+    var notPublishedEvents = new List<string>();
+    using (var notPublishedClient = new PrivateUpdateClient(publicDer, (evt, _) => notPublishedEvents.Add(evt), new FakeHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)), expectedFingerprint))
+    {
+        if (notPublishedClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None || !notPublishedEvents.Contains("UPDATE_CHECK_NOT_PUBLISHED")) throw new Exception("manifest 404 not treated as not-published");
+    }
+    var signatureNotPublishedEvents = new List<string>();
+    using (var signatureNotPublishedClient = new PrivateUpdateClient(publicDer, (evt, _) => signatureNotPublishedEvents.Add(evt), new FakeHandler(request => request.RequestUri!.AbsoluteUri == UpdateTrust.ManifestUri.AbsoluteUri ? FakeResponse(manifestBytes) : new HttpResponseMessage(HttpStatusCode.NotFound)), expectedFingerprint))
+    {
+        if (signatureNotPublishedClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None || !signatureNotPublishedEvents.Contains("UPDATE_CHECK_NOT_PUBLISHED")) throw new Exception("signature 404 not treated as not-published");
+    }
+    var timeoutEvents = new List<string>();
+    using (var timeoutClient = new PrivateUpdateClient(publicDer, (evt, _) => timeoutEvents.Add(evt), new FakeHandler(_ => throw new TaskCanceledException()), expectedFingerprint))
+    {
+        if (timeoutClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.Failed || !timeoutEvents.Contains("UPDATE_CHECK_FAILED")) throw new Exception("timeout not treated separately");
+    }
+    if (UpdateHostArguments.TryParse(Array.Empty<string>(), out _)) throw new Exception("UpdateHost accepted empty arguments");
+    if (UpdateHostArguments.TryParse(new[] { "--parent-pid", "1", "--msi", "x", "--sha256", "ABC", "--app", "x" }, out _)) throw new Exception("UpdateHost accepted invalid arguments");
+    CryptographicOperations.ZeroMemory(publicDer); CryptographicOperations.ZeroMemory(payload); CryptographicOperations.ZeroMemory(manifestBytes); CryptographicOperations.ZeroMemory(signature); CryptographicOperations.ZeroMemory(changed); CryptographicOperations.ZeroMemory(wrongSignature);
+}
+
+static void AutomaticUpdateTests(string root)
+{
+    if (UpdateCheckSchedule.InitialDelay != TimeSpan.FromSeconds(5) || UpdateCheckSchedule.RecurringInterval != TimeSpan.FromMinutes(10)) throw new Exception("update check schedule");
+    var manifest = new UpdateManifest(1, "private-alpha", "0.1.7-alpha", "0.1.7", "0.1.6-alpha", "https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Freleases%2FCODMunityTop250Collector-0.1.7-alpha-win-x64.msi", new string('A', 64), 1, new DateTimeOffset(2026, 8, 17, 0, 0, 0, TimeSpan.Zero), "Synthetic release.");
+    AppSemanticVersion.TryParse("0.1.7-alpha", out var version);
+    var update = new AvailableUpdate(manifest, version);
+    var events = new List<string>();
+    var coordinator = new AutomaticUpdateCoordinator();
+    var result = coordinator.RunAsync(update,
+        (_, _) => { events.Add("download"); return Task.FromResult("fixture.msi"); },
+        () => events.Add("pause"),
+        _ => { events.Add("wait"); return Task.CompletedTask; },
+        () => events.Add("resume"),
+        (evt, detail) => events.Add(evt + " " + detail),
+        (_, _) => events.Add("host"),
+        CancellationToken.None).GetAwaiter().GetResult();
+    var prefix = string.Join('|', events.Take(3));
+    if (result != AutomaticUpdateOutcome.HandedOff || prefix != "download|pause|wait" || !events.Contains("host") || !events.Contains("UPDATE_INSTALL_HANDOFF version=0.1.7-alpha")) throw new Exception("automatic update handoff sequence");
+
+    events.Clear();
+    var failure = new AutomaticUpdateCoordinator().RunAsync(update,
+        (_, _) => { events.Add("download"); throw new CryptographicException(); },
+        () => events.Add("pause"), _ => Task.CompletedTask, () => events.Add("resume"),
+        (evt, detail) => events.Add(evt + " " + detail), (_, _) => events.Add("host"), CancellationToken.None).GetAwaiter().GetResult();
+    if (failure != AutomaticUpdateOutcome.Failed || events.Contains("pause") || events.Contains("host") || !events.Any(x => x.StartsWith("UPDATE_AUTO_UPDATE_FAILED", StringComparison.Ordinal))) throw new Exception("download failure started update host");
+
+    events.Clear();
+    var runningGate = new TaskCompletionSource();
+    var deferred = new AutomaticUpdateCoordinator().RunAsync(update,
+        (_, _) => { events.Add("download"); return Task.FromResult("fixture.msi"); },
+        () => events.Add("pause"), _ => { events.Add("wait"); return runningGate.Task; }, () => events.Add("resume"),
+        (evt, detail) => events.Add(evt + " " + detail), (_, _) => events.Add("host"), CancellationToken.None);
+    if (events.Contains("host")) throw new Exception("running collector did not defer update host");
+    runningGate.SetResult();
+    if (deferred.GetAwaiter().GetResult() != AutomaticUpdateOutcome.HandedOff || !events.Contains("host")) throw new Exception("deferred update did not continue after cycle");
+
+    if (!AppSemanticVersion.TryParse("0.1.6-alpha", out var current) || current.ToString() != "0.1.6-alpha") throw new Exception("updater version logging format");
+    var updateGate = new UpdateOperationGate();
+    if (!updateGate.TryBegin() || updateGate.TryBegin() || !updateGate.IsActive) throw new Exception("manual and automatic update checks are not serialized");
+    updateGate.End(); if (updateGate.IsActive || !updateGate.TryBegin()) throw new Exception("update operation gate does not release"); updateGate.End();
+    if (UpdateHostPresentation.ShouldShowFailureWindow(new UpdateInstallationResult(0, true, false)) || !UpdateHostPresentation.ShouldShowFailureWindow(new UpdateInstallationResult(1603, false, false, "failed"))) throw new Exception("UpdateHost headless success/failure UI policy");
+    if (UpdateInstallation.InstallUiLevelNone != 2) throw new Exception("Windows Installer API UI level");
+    if (WindowsInstallerApi.InstallLogMode != 0x00001B16 || (WindowsInstallerApi.InstallLogMode & WindowsInstallerApi.InstallLogModeLogOnlyOnError) != 0) throw new Exception("Windows Installer API log mode");
+    if (WindowsInstallerApi.InstallLogAttributesFlushEachLine != 0x00000002) throw new Exception("Windows Installer API log attributes");
+    var installerCalls = new List<string>();
+    var fakeInstaller = new FakeWindowsInstallerApi(0, installerCalls);
+    var hostLogDirectory = Path.Combine(root, "update-host-log");
+    var nativeExit = UpdateInstallation.InstallValidatedMsiAsync("fixture.msi", fakeInstaller, (evt, detail) => installerCalls.Add(evt + " " + detail), hostLogDirectory).GetAwaiter().GetResult();
+    if (nativeExit != 0 || string.Join('|', installerCalls) != "enable-log|UPDATEHOST_MSI_LOG_ENABLE result=0 path=logs/update-msi.log mode=0x00001B16 attributes=0x00000002|set-ui-2|UPDATEHOST_MSI_UI_SET requested=2 previous=0|UPDATEHOST_MSI_INSTALL_START |install fixture.msi REBOOT=ReallySuppress|UPDATEHOST_MSI_INSTALL_EXIT code=0") throw new Exception("Windows Installer API invocation");
+    if (!Directory.Exists(hostLogDirectory)) throw new Exception("Windows Installer API log directory");
+    var unavailableLogEvents = new List<string>();
+    var unavailableLogExit = UpdateInstallation.InstallValidatedMsiAsync("fixture.msi", new FakeWindowsInstallerApi(0, new List<string>(), 87), (evt, detail) => unavailableLogEvents.Add(evt + " " + detail), Path.Combine(root, "update-host-log-unavailable")).GetAwaiter().GetResult();
+    if (unavailableLogExit != 0 || !unavailableLogEvents.Contains("UPDATEHOST_MSI_LOG_ENABLE result=87 path=logs/update-msi.log mode=0x00001B16 attributes=0x00000002")) throw new Exception("Windows Installer API log result");
+    var rebootExit = UpdateInstallation.InstallValidatedMsiAsync("fixture.msi", new FakeWindowsInstallerApi(3010, new List<string>()), (_, _) => { }).GetAwaiter().GetResult();
+    var failureExit = UpdateInstallation.InstallValidatedMsiAsync("fixture.msi", new FakeWindowsInstallerApi(1603, new List<string>()), (_, _) => { }).GetAwaiter().GetResult();
+    if (!UpdateInstallation.IsSuccessfulMsiExitCode(rebootExit) || UpdateInstallation.IsSuccessfulMsiExitCode(failureExit)) throw new Exception("Windows Installer API exit-code handling");
+    if (!UpdateInstallation.IsSuccessfulMsiExitCode(0) || !UpdateInstallation.IsSuccessfulMsiExitCode(3010) || UpdateInstallation.IsSuccessfulMsiExitCode(1603)) throw new Exception("MSI exit-code handling");
+}
+
+static FakeHandler CreateUpdateHandler(ECDsa signer, byte[] publicDer, UpdateManifest manifest, byte[] payload)
+{
+    var bytes = SerializeUpdateManifest(manifest);
+    var signature = signer.SignData(bytes, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    return new FakeHandler(request =>
+    {
+        var address = request.RequestUri!.AbsoluteUri;
+        if (address == UpdateTrust.ManifestUri.AbsoluteUri) return FakeResponse(bytes);
+        if (address == UpdateTrust.SignatureUri.AbsoluteUri) return FakeResponse(Encoding.ASCII.GetBytes(Convert.ToBase64String(signature)));
+        if (address == manifest.Url) return FakeResponse(payload);
+        return new HttpResponseMessage(HttpStatusCode.NotFound) { RequestMessage = request };
+    });
+}
+
+static byte[] SerializeUpdateManifest(UpdateManifest manifest) => Encoding.UTF8.GetBytes($$"""{"schemaVersion":{{manifest.SchemaVersion}},"channel":"{{manifest.Channel}}","version":"{{manifest.Version}}","msiVersion":"{{manifest.MsiVersion}}","minimumUpdaterVersion":"{{manifest.MinimumUpdaterVersion}}","url":"{{manifest.Url}}","sha256":"{{manifest.Sha256}}","size":{{manifest.Size}},"publishedAtUtc":"{{manifest.PublishedAtUtc:yyyy-MM-ddTHH:mm:ssZ}}","releaseNotes":"{{manifest.ReleaseNotes}}"}""");
+static HttpResponseMessage FakeResponse(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+sealed class FakeHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var response = respond(request); response.RequestMessage ??= request; return Task.FromResult(response);
+    }
+}
+
+sealed class FakeWindowsInstallerApi(uint installResult, List<string> calls, uint logResult = 0) : IWindowsInstallerApi
+{
+    public uint SetInternalUI(uint uiLevel) { calls.Add($"set-ui-{uiLevel}"); return 0; }
+    public uint EnableLog(string logPath) { calls.Add("enable-log"); return logResult; }
+    public uint InstallProduct(string validatedMsiPath, string properties) { calls.Add($"install {validatedMsiPath} {properties}"); return installResult; }
+}
+
+sealed class CountingBuildHasher(string sha256) : IBuildHasher
+{
+    public int Calls { get; private set; }
+    public Task<string> ComputeSha256Async(string path, CancellationToken token)
+    {
+        Calls++;
+        return Task.FromResult(sha256);
+    }
+}
+
+sealed class FakeCodProcessMonitor(CodProcessDescriptor descriptor) : CodProcessMonitor
+{
+    public override int? FindSinglePid() => descriptor.Pid;
+    public override CodProcessDescriptor? Describe(int pid) => pid == descriptor.Pid ? descriptor : null;
+}
+
+sealed class FakeEngineRunner(AppLogger log) : EngineRunner(log)
+{
+    public List<VerifiedBuildIdentity?> Identities { get; } = [];
+    public override Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
+    {
+        Identities.Add(identity);
+        var timestamp = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        var json = $"{{\"capturedAt\":\"{timestamp}\",\"platform\":\"battlenet\",\"layout\":\"bnet-current\",\"cycleStatus\":\"OK\",\"datasets\":{{\"mp\":{{\"status\":\"WAITING\"}},\"br\":{{\"status\":\"WAITING\"}},\"resurgence\":{{\"status\":\"WAITING\"}}}}}}";
+        return Task.FromResult((0, json, string.Empty));
+    }
+}
+
+sealed class PriorityEngineRunner(AppLogger log) : EngineRunner(log)
+{
+    public override Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
+    {
+        var capturedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        var players = Enumerable.Range(1, 250).Select(position => new { position, sr = 30000 - position, name = $"player-{position}" }).ToArray();
+        var json = JsonSerializer.Serialize(new { capturedAt, platform = "battlenet", layout = "bnet-current", cycleStatus = "OK", datasets = new { mp = new { status = "OK", rows = 250, capturedAt, players }, br = new { status = "OK", rows = 250, capturedAt, players }, resurgence = new { status = "OK", rows = 250, capturedAt, players } } });
+        return Task.FromResult((0, json, string.Empty));
+    }
+}
+
+sealed class StaticTokenProvider(string? token) : IApiTokenProvider { public string? GetToken() => token; }
+sealed class RecordingHandler(IEnumerable<HttpStatusCode> statuses) : HttpMessageHandler
+{
+    private readonly Queue<HttpStatusCode> statuses = new(statuses); public int Calls { get; private set; } public string? Body { get; private set; } public string? Authorization { get; private set; } public List<string> Modes { get; } = [];
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+    {
+        Calls++; Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(token); Authorization = request.Headers.Authorization?.ToString();
+        if (Body is not null) { using var json = JsonDocument.Parse(Body); Modes.Add(json.RootElement.GetProperty("mode").GetString() ?? string.Empty); }
+        return new HttpResponseMessage(statuses.Count > 0 ? statuses.Dequeue() : HttpStatusCode.OK);
+    }
+}

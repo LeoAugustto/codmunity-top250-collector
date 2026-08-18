@@ -1,0 +1,37 @@
+# Build output and IDE state
+**/bin/
+**/obj/
+.vs/
+dist/
+artifacts/
+TestResults/
+
+# User and temporary files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.tmp
+*.temp
+*.bak
+*.cache
+*.log
+logs/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pfx
+*.p12
+*.pem
+!CODMunityTop250Collector.App/Updater/codmunity-top250-release-public.pem
+*.credentials
+*.secret
+
+# Local release/staging material
+release/
+releases/
+staging/
+updates/

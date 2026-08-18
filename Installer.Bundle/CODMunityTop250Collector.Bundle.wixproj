@@ -1,0 +1,12 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputName>CODMunityTop250Collector-0.1.18-alpha-Setup</OutputName>
+    <OutputPath>$(MSBuildProjectDirectory)\..\dist\setup\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.BootstrapperApplications.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.Netfx.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>
