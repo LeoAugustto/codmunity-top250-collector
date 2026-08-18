@@ -174,8 +174,11 @@ function Publish-GitHubReleaseMirror {
     New-Sha256Sums -Context $context
     $assets = @($context.Setup, $context.Msi, $context.PortableZip, $context.Manifest, $context.Signature, $context.Sha256Sums)
 
-    & $gh release view $context.Tag --repo $script:Repository 2>$null | Out-Null
-    $releaseExists = $LASTEXITCODE -eq 0
+    # `gh release view` returns a non-zero exit code for an expected first-release
+    # absence. List tags instead so the idempotency probe itself cannot abort.
+    $releaseTags = @((& $gh release list --repo $script:Repository --limit 100 --json tagName | ConvertFrom-Json) | ForEach-Object tagName)
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect existing GitHub Releases.' }
+    $releaseExists = $releaseTags -contains $context.Tag
     if (-not $releaseExists) {
         $notesFile = Join-Path ([System.IO.Path]::GetTempPath()) ("codmunity-release-notes-$([guid]::NewGuid().ToString('N')).md")
         try {
