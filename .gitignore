@@ -35,3 +35,6 @@ release/
 releases/
 staging/
 updates/
+
+# Local Battle.net visual templates and their metadata may originate from a personal launcher window.
+tools/CODWatchdogPrototype/templates/local/

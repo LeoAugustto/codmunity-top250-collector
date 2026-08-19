@@ -39,6 +39,7 @@ try
     BuildIdentityCacheTests(log).GetAwaiter().GetResult();
     SchedulerBuildIdentityIntegrationTests(log).GetAwaiter().GetResult();
     SchedulerApiPriorityTests(log).GetAwaiter().GetResult();
+    WatchdogPolicyTests();
     EngineManagedIdentityContractTests();
     Console.WriteLine("PASS settings compatibility, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
 }
@@ -119,6 +120,22 @@ static async Task BuildIdentityCacheTests(AppLogger log)
     if (await cache.GetOrCreateAsync(pidChanged with { Platform = "xbox" }, CancellationToken.None) is not null || hasher.Calls != 5) throw new Exception("Xbox must not use file SHA cache");
 }
 
+static void WatchdogPolicyTests()
+{
+    var now = DateTimeOffset.Parse("2026-08-19T12:00:00Z");
+    if (new CollectorSettings().KeepCallOfDutyRunning) throw new Exception("watchdog must default off");
+    if (CodWatchdogPolicy.AssessCollectionHealth(now, now.AddMinutes(-2), now.AddMinutes(-2)) != WatchdogCollectionHealth.Healthy) throw new Exception("watchdog fresh cycle policy");
+    if (CodWatchdogPolicy.AssessCollectionHealth(now, now.AddMinutes(-7), now.AddMinutes(-12)) != WatchdogCollectionHealth.Warning) throw new Exception("watchdog warning threshold");
+    if (CodWatchdogPolicy.AssessCollectionHealth(now, now.AddMinutes(-11), now.AddMinutes(-12)) != WatchdogCollectionHealth.Confirmed) throw new Exception("watchdog confirmation threshold");
+    if (CodWatchdogPolicy.IsPlayConfidenceSufficient(.949) || !CodWatchdogPolicy.IsPlayConfidenceSufficient(.950)) throw new Exception("watchdog active click threshold");
+    var point = CodWatchdogPolicy.WindowRelativeToScreen(100, 200, new PlayMatch(40, 50, 20, 10, .99));
+    if (point.X != 150 || point.Y != 255) throw new Exception("watchdog window-relative coordinates");
+    var budget = new RecoveryBudget();
+    budget.RecordFailure(now); budget.RecordFailure(now.AddMinutes(1)); budget.RecordFailure(now.AddMinutes(2));
+    if (!budget.IsCoolingDown(now.AddMinutes(2))) throw new Exception("watchdog recovery budget");
+    var serviceSource = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "CODMunityTop250Collector.Core", "CodWatchdogService.cs"));
+    if (!serviceSource.Contains("battlenet://game/auks", StringComparison.Ordinal) || serviceSource.Contains("Process.Start(cod", StringComparison.OrdinalIgnoreCase)) throw new Exception("watchdog Battle.net launch-only contract");
+}
 static int Count(string value, string needle) => value.Split(needle, StringSplitOptions.None).Length - 1;
 
 static void UnicodeMachineReadableTransportTests()

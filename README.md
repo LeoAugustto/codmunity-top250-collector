@@ -21,7 +21,7 @@ Secrets and credentials are deliberately excluded from this repository. Never co
 - `CODMunityTop250Collector.Updater` / `CODMunityTop250Collector.UpdateHost` — signed update checks and local MSI handoff.
 - `engine` — versioned PowerShell orchestrator, build layouts, and exporters used by the app.
 - `Installer.Wix` / `Installer.Bundle` — per-user MSI and branded Burn setup.
-- `tools` — offline signing/release helpers and build helpers.
+- `tools` — offline signing/release helpers, build helpers, and the validated Watchdog prototype.
 
 ## Build
 
@@ -45,6 +45,11 @@ For an internal build with the embedded Closed Beta API credential, run:
 
 The helper accepts an already-provided `CODMUNITY_RANKED_SYNC_TOKEN_BUILD` environment credential, otherwise it prompts securely. It never prints or stores the token. Runtime environment credentials remain higher priority than the embedded Closed Beta credential.
 
+## Dedicated station watchdog
+
+Version `0.1.19-alpha` includes an opt-in Battle.net-only watchdog for a dedicated collector station. It is disabled by default. When enabled in Settings, it checks local collector activity every 10 seconds and only captures/matches the local Battle.net Play template while a startup or recovery is needed. A stale local `CYCLE_OK` is the health signal; API sync failures alone never trigger recovery.
+
+Recovery is deliberately limited to closing the existing `cod.exe` instance after confirmation, then opening the locally validated `battlenet://game/auks` URI and clicking the packaged Play template at a confidence of at least `0.950`. It never launches `cod.exe` directly and does not automate server-disconnect, update, Battle.net restart, Collector restart, or reboot flows. The recovery budget is three failures in 30 minutes followed by a 30-minute cooldown.
 ## Release flow
 
 1. Build and validate locally.
@@ -52,7 +57,7 @@ The helper accepts an already-provided `CODMUNITY_RANKED_SYNC_TOKEN_BUILD` envir
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.18-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.19-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.

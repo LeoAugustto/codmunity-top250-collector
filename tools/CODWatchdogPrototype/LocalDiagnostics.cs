@@ -1,18 +1,19 @@
 using Microsoft.Win32;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace CODWatchdogPrototype;
 
-public sealed record ProcessSnapshot(string Name, int Pid, int? ParentPid, string? ExecutablePath, DateTimeOffset? StartedAtUtc, string WindowTitle, string WindowClass, IntPtr WindowHandle, ProcessPriorityClass? Priority);
+public sealed record ProcessSnapshot(string Name, int Pid, int? ParentPid, string? ExecutablePath, DateTimeOffset? StartedAtUtc, string WindowTitle, string WindowClass, IntPtr WindowHandle, bool WindowVisible, ProcessPriorityClass? Priority);
 public sealed record ProtocolHandler(string Name, bool Registered, string ExecutableName, bool AcceptsUriArgument);
 public sealed record BattleNetSignals(ProtocolHandler BattleNetProtocol, ProtocolHandler BlizzardProtocol, bool UpdateKeywordsObserved, IReadOnlyList<string> RecentSignalFiles);
 
 public static class ProcessDiagnostics
 {
-    private static readonly string[] RelevantNames = ["cod", "battle.net", "battle.net launcher", "agent", "blizzard update agent", "blizzardbrowser"];
+    private static readonly string[] RelevantNames = ["cod", "battle.net", "battle.net launcher", "agent", "blizzard update agent", "blizzardbrowser", "codmunitytop250collector"];
     public static IReadOnlyList<ProcessSnapshot> ReadRelevantProcesses()
     {
         var result = new List<ProcessSnapshot>();
@@ -34,10 +35,9 @@ public static class ProcessDiagnostics
         .OrderByDescending(process => process.WindowHandle != IntPtr.Zero)
         .ThenBy(process => process.Pid)
         .FirstOrDefault();
-    public static ProcessSnapshot? FindPrimaryBattleNetProcess(IEnumerable<ProcessSnapshot> processes) => processes
-        .Where(process => process.Name.Equals("battle.net.exe", StringComparison.OrdinalIgnoreCase) || process.Name.Equals("battle.net launcher.exe", StringComparison.OrdinalIgnoreCase))
-        .OrderByDescending(process => process.WindowHandle != IntPtr.Zero && process.WindowTitle.Contains("Battle.net", StringComparison.OrdinalIgnoreCase))
-        .ThenByDescending(process => process.WindowHandle != IntPtr.Zero)
+    public static ProcessSnapshot? FindPrimaryBattleNetWindow(IEnumerable<ProcessSnapshot> processes) => processes
+        .Where(process => (process.Name.Equals("battle.net.exe", StringComparison.OrdinalIgnoreCase) || process.Name.Equals("battle.net launcher.exe", StringComparison.OrdinalIgnoreCase)) && process.WindowHandle != IntPtr.Zero && process.WindowVisible)
+        .OrderByDescending(process => process.WindowTitle.Contains("Battle.net", StringComparison.OrdinalIgnoreCase))
         .ThenBy(process => process.Pid)
         .FirstOrDefault();
     public static IReadOnlyList<ProcessSnapshot> FindBattleNetProcesses(IEnumerable<ProcessSnapshot> processes) => processes
@@ -46,6 +46,11 @@ public static class ProcessDiagnostics
     public static IReadOnlyList<ProcessSnapshot> FindAgents(IEnumerable<ProcessSnapshot> processes) => processes
         .Where(process => process.Name.Equals("agent.exe", StringComparison.OrdinalIgnoreCase) || process.Name.Contains("blizzard", StringComparison.OrdinalIgnoreCase))
         .ToArray();
+    public static ProcessSnapshot? FindCollectorProcess(IEnumerable<ProcessSnapshot> processes) => processes
+        .Where(process => process.Name.Equals("CODMunityTop250Collector.exe", StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(process => process.WindowHandle != IntPtr.Zero)
+        .ThenBy(process => process.Pid)
+        .FirstOrDefault();
     public static string? TryGetExecutablePathForDiagnostics(int processId) => NativeMethods.TryGetExecutablePath(processId);
 
     private static ProcessSnapshot Snapshot(Process process)
@@ -55,7 +60,7 @@ public static class ProcessDiagnostics
         try { started = process.StartTime.ToUniversalTime(); } catch { }
         try { priority = process.PriorityClass; } catch { }
         var handle = process.MainWindowHandle;
-        return new(process.ProcessName + ".exe", process.Id, NativeMethods.TryGetParentProcessId(process.Handle), NativeMethods.TryGetExecutablePath(process.Id), started, Safe(() => process.MainWindowTitle), NativeMethods.GetWindowClass(handle), handle, priority);
+        return new(process.ProcessName + ".exe", process.Id, NativeMethods.TryGetParentProcessId(process.Handle), NativeMethods.TryGetExecutablePath(process.Id), started, Safe(() => process.MainWindowTitle), NativeMethods.GetWindowClass(handle), handle, NativeMethods.IsWindowVisible(handle), priority);
     }
     private static string Safe(Func<string> action) { try { return action(); } catch { return string.Empty; } }
 }
@@ -100,21 +105,33 @@ public static class BattleNetDiagnostics
     }
 }
 
+public sealed record CollectorLogSnapshot(DateTimeOffset? LastCycleOkUtc, CollectorActivityState Activity);
+
 public static class CollectorHealthReader
 {
-    public static DateTimeOffset? ReadLastCycleOkUtc()
+    public static CollectorLogSnapshot Read()
     {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CODMunity", "Top250Collector", "logs", "app.log");
-        if (!File.Exists(path)) return null;
+        if (!File.Exists(path)) return new(null, CollectorActivityState.Unknown);
         try
         {
-            return File.ReadLines(path).Reverse().Take(2_000)
-                .Select(line => line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries))
-                .Where(parts => parts.Length == 2 && parts[1].StartsWith("CYCLE_OK", StringComparison.Ordinal))
-                .Select(parts => DateTimeOffset.TryParse(parts[0], out var timestamp) ? timestamp : (DateTimeOffset?)null)
-                .FirstOrDefault(timestamp => timestamp is not null);
+            DateTimeOffset? lastCycle = null;
+            var activity = CollectorActivityState.Unknown;
+            foreach (var line in File.ReadLines(path).Reverse().Take(4_000))
+            {
+                var parts = line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length != 2 || !DateTimeOffset.TryParse(parts[0], out var timestamp)) continue;
+                if (lastCycle is null && parts[1].StartsWith("CYCLE_OK", StringComparison.Ordinal)) lastCycle = timestamp;
+                if (activity == CollectorActivityState.Unknown)
+                {
+                    if (parts[1].StartsWith("COLLECTOR_ENABLED", StringComparison.Ordinal)) activity = CollectorActivityState.Enabled;
+                    if (parts[1].StartsWith("COLLECTOR_DISABLED", StringComparison.Ordinal)) activity = CollectorActivityState.Disabled;
+                }
+                if (lastCycle is not null && activity != CollectorActivityState.Unknown) break;
+            }
+            return new(lastCycle, activity);
         }
-        catch { return null; }
+        catch { return new(null, CollectorActivityState.Unknown); }
     }
 }
 
@@ -126,20 +143,40 @@ public static class WindowCapture
 {
     public static string? Capture(ProcessSnapshot? snapshot, string outputDirectory)
     {
-        if (snapshot is null || snapshot.WindowHandle == IntPtr.Zero || !NativeMethods.TryGetWindowRectangle(snapshot.WindowHandle, out var rectangle)) return null;
+        using var image = CaptureBitmap(snapshot);
+        if (image is null) return null;
         Directory.CreateDirectory(outputDirectory);
-        var width = rectangle.Right - rectangle.Left;
-        var height = rectangle.Bottom - rectangle.Top;
-        if (width <= 0 || height <= 0) return null;
         var path = Path.Combine(outputDirectory, $"watchdog-state-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}.png");
-        using var image = new Bitmap(width, height);
-        using var graphics = Graphics.FromImage(image);
-        graphics.CopyFromScreen(rectangle.Left, rectangle.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
         image.Save(path);
         foreach (var old in new DirectoryInfo(outputDirectory).EnumerateFiles("*.png").OrderByDescending(file => file.CreationTimeUtc).Skip(10)) old.Delete();
         return path;
     }
-}
+    public static Bitmap? CaptureBitmap(ProcessSnapshot? snapshot)
+    {
+        if (snapshot is null || snapshot.WindowHandle == IntPtr.Zero || !NativeMethods.TryGetWindowRectangle(snapshot.WindowHandle, out var rectangle)) return null;
+        var width = rectangle.Right - rectangle.Left;
+        var height = rectangle.Bottom - rectangle.Top;
+        if (width <= 0 || height <= 0) return null;
+        var image = new Bitmap(width, height);
+        try
+        {
+            using var graphics = Graphics.FromImage(image);
+            graphics.CopyFromScreen(rectangle.Left, rectangle.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+            return image;
+        }
+        catch { image.Dispose(); return null; }
+    }
+    public static uint GetWindowDpi(ProcessSnapshot? snapshot) => snapshot is null || snapshot.WindowHandle == IntPtr.Zero ? 0 : NativeMethods.GetWindowDpi(snapshot.WindowHandle);
+    public static bool TryGetScreenPoint(ProcessSnapshot snapshot, int relativeX, int relativeY, out Point point)
+    {
+        point = default;
+        if (snapshot.WindowHandle == IntPtr.Zero || !NativeMethods.TryGetWindowRectangle(snapshot.WindowHandle, out var rectangle)) return false;
+        var width = rectangle.Right - rectangle.Left;
+        var height = rectangle.Bottom - rectangle.Top;
+        if (width <= 0 || height <= 0 || relativeX < 0 || relativeY < 0 || relativeX >= width || relativeY >= height) return false;
+        point = new Point(rectangle.Left + relativeX, rectangle.Top + relativeY);
+        return true;
+    }}
 
 internal static class NativeMethods
 {
@@ -152,6 +189,8 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr hWnd, char[] className, int maxCount);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out Rect rectangle);
+    [DllImport("user32.dll", EntryPoint = "IsWindowVisible")] private static extern bool IsWindowVisibleNative(IntPtr hWnd);
+    [DllImport("user32.dll", EntryPoint = "GetDpiForWindow")] private static extern uint GetDpiForWindowNative(IntPtr hWnd);
     public static int? TryGetParentProcessId(IntPtr handle)
     {
         var info = new ProcessBasicInformation();
@@ -176,5 +215,7 @@ internal static class NativeMethods
         var count = GetClassNameW(handle, buffer, buffer.Length);
         return count > 0 ? new string(buffer, 0, count) : string.Empty;
     }
+    public static bool IsWindowVisible(IntPtr handle) => handle != IntPtr.Zero && IsWindowVisibleNative(handle);
+    public static uint GetWindowDpi(IntPtr handle) { try { return GetDpiForWindowNative(handle); } catch (EntryPointNotFoundException) { return 0; } }
     public static bool TryGetWindowRectangle(IntPtr handle, out Rect rectangle) => GetWindowRect(handle, out rectangle);
 }

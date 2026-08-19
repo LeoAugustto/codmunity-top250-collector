@@ -16,7 +16,7 @@ public static class CollectorPaths
 }
 
 // Unknown properties in legacy settings (including HistoryRetentionDays) are ignored by System.Text.Json.
-public sealed record CollectorSettings(bool CollectorEnabled = true, bool StartWithWindows = false)
+public sealed record CollectorSettings(bool CollectorEnabled = true, bool StartWithWindows = false, bool KeepCallOfDutyRunning = false)
 {
     public CollectorSettings Normalized() => this;
 }

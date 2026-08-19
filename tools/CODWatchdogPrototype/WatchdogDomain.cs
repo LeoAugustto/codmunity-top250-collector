@@ -2,14 +2,15 @@ namespace CODWatchdogPrototype;
 
 public enum WatchdogState
 {
-    Healthy, CodNotRunning, BnetNotRunning,
+    Healthy, CodNotRunning, BnetNotRunning, CollectorNotRunning, CollectorDisabled,
     NoDataWarning, NoDataConfirmed, CheckingGameState,
     ServerDisconnectedRestart, ServerDisconnectedQuit,
     BnetUpdateInProgress, GameUpdateRequiresRestart,
-    RestartingCod, WaitingForCod, WaitingForData,
+    RestartingCod, WaitingForBnet, WaitingForCod, WaitingForData,
     RecoveryFailed, Cooldown, SystemRecoveryRequired
 }
 
+public enum CollectorActivityState { Unknown, Enabled, Disabled }
 public enum SimulatedState { None, CodMissing, NoData, ServerDisconnectedQuit, ServerDisconnectedRestart, BnetUpdate }
 
 public sealed record WatchdogConfiguration(
@@ -33,7 +34,10 @@ public sealed record WatchdogConfiguration(
 
 public sealed record WatchdogObservation(
     bool CodRunning,
-    bool BattleNetRunning,
+    bool BattleNetAppRunning,
+    bool BattleNetAgentRunning,
+    bool CollectorRunning,
+    CollectorActivityState CollectorActivity,
     bool BattleNetUpdateInProgress,
     bool GameUpdateRequiresRestart,
     bool ServerDisconnectedRestart,
@@ -88,16 +92,23 @@ public sealed class WatchdogStateMachine
     private WatchdogState Resolve(WatchdogObservation observation, DateTimeOffset now, List<string> actions)
     {
         if (budget.IsCoolingDown(now, configuration)) return WatchdogState.Cooldown;
+        // The Collector is a hard prerequisite for every recovery action. Never launch or restart COD when it is absent or disabled.
+        if (!observation.CollectorRunning) return WatchdogState.CollectorNotRunning;
+        if (observation.CollectorActivity == CollectorActivityState.Disabled) return WatchdogState.CollectorDisabled;
+        if (!observation.CodRunning)
+        {
+            if (!observation.BattleNetAppRunning)
+            {
+                actions.Add("open_battlenet_launcher_uri");
+                return WatchdogState.BnetNotRunning;
+            }
+            actions.Add("launch_cod_via_battlenet_unvalidated");
+            return WatchdogState.CodNotRunning;
+        }
         if (observation.BattleNetUpdateInProgress) return WatchdogState.BnetUpdateInProgress;
         if (observation.GameUpdateRequiresRestart) return WatchdogState.GameUpdateRequiresRestart;
         if (observation.ServerDisconnectedRestart) return WatchdogState.ServerDisconnectedRestart;
         if (observation.ServerDisconnectedQuit) return WatchdogState.ServerDisconnectedQuit;
-        if (!observation.CodRunning)
-        {
-            if (!observation.BattleNetRunning) return WatchdogState.BnetNotRunning;
-            actions.Add("launch_cod_via_battlenet_unvalidated");
-            return WatchdogState.CodNotRunning;
-        }
 
         var hasCycleInCurrentCodSession = observation.LastValidCollectionUtc is { } cycle &&
             (observation.CodStartedAtUtc is null || cycle >= observation.CodStartedAtUtc.Value);
@@ -107,7 +118,6 @@ public sealed class WatchdogStateMachine
             if (runningFor < configuration.StartupDataGrace) return WatchdogState.WaitingForData;
             return ResolveStale(runningFor);
         }
-
         return ResolveStale(now - observation.LastValidCollectionUtc!.Value);
     }
     private WatchdogState ResolveStale(TimeSpan age)

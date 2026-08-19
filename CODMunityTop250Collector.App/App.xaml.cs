@@ -10,7 +10,7 @@ using Forms = System.Windows.Forms;
 namespace CODMunityTop250Collector.App;
 public partial class App : System.Windows.Application
 {
-    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private CollectorScheduler? scheduler; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
+    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private CollectorScheduler? scheduler; private CodWatchdogService? watchdog; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -22,12 +22,16 @@ public partial class App : System.Windows.Application
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
             log = new AppLogger(); log.Write("APP_START"); settingsStore = new SettingsStore(log); settings = settingsStore.Load();
             var rankedApi = new RankedPlayersApiClient(new CompositeApiTokenProvider(new EnvironmentApiTokenProvider(), new EmbeddedRankedSyncTokenProvider()), log);
-            scheduler = new CollectorScheduler(new CodProcessMonitor(), new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine")); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
+            var codMonitor = new CodProcessMonitor();
+            scheduler = new CollectorScheduler(codMonitor, new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine")); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
             window = new MainWindow(this); window.SetVersion(AppVersion.Display); window.SetSettings(settings); CreateTray(); cts = new CancellationTokenSource();
+            watchdog = new CodWatchdogService(codMonitor, scheduler, log, Path.Combine(AppContext.BaseDirectory, "Assets", "watchdog", "bnet-play.png"));
+            watchdog.Changed += s => Dispatcher.Invoke(() => window?.SetWatchdogStatus(s));
+            window.SetWatchdogStatus(watchdog.Snapshot);
             var publicKey = EmbeddedUpdateKey.LoadSubjectPublicKeyInfo();
             try { updater = new PrivateUpdateClient(publicKey, (evt, detail) => log?.Write(evt, detail)); }
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(publicKey); }
-            _ = scheduler.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token);
+            _ = scheduler.RunAsync(cts.Token); _ = watchdog.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token);
             _ = Task.Run(async () => { while (!cts.IsCancellationRequested) { showEvent.WaitOne(); await Dispatcher.InvokeAsync(ShowWindow); } });
         }
         catch (Exception ex)
@@ -69,7 +73,7 @@ public partial class App : System.Windows.Application
         log?.Write("TRAY_ICON_FALLBACK", "Using SystemIcons.Application.");
         return System.Drawing.SystemIcons.Application;
     }
-    public void Save(CollectorSettings updated) { settings = updated.Normalized(); settingsStore!.Save(settings); scheduler!.UpdateSettings(settings); window?.SetSettings(settings); }
+    public void Save(CollectorSettings updated) { settings = updated.Normalized(); settingsStore!.Save(settings); scheduler!.UpdateSettings(settings); watchdog?.NotifySettingsChanged(settings); window?.SetSettings(settings); }
     public Task SyncNowAsync() => scheduler?.SyncNowAsync(CancellationToken.None) ?? Task.CompletedTask;
     public async Task CheckForUpdatesFromSettingsAsync() => await CheckForUpdatesAsync("settings", manual: true, CancellationToken.None);
     private async Task CheckForUpdatesFromTrayAsync()

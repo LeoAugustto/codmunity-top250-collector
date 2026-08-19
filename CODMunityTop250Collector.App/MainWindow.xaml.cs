@@ -32,9 +32,23 @@ public partial class MainWindow : Window
         updating = true;
         Enabled.IsChecked = settings.CollectorEnabled;
         Startup.IsChecked = settings.StartWithWindows;
+        KeepCodRunning.IsChecked = settings.KeepCallOfDutyRunning;
         updating = false;
     }
     public void SetVersion(string version) { VersionText.Text = "v" + version; SettingsVersionText.Text = version; SettingsUpdateVersionText.Text = "v" + version; }
+    public void SetWatchdogStatus(CodWatchdogSnapshot status)
+    {
+        WatchdogStatusText.Text = status.Status switch
+        {
+            CodWatchdogStatus.Disabled => "Watchdog disabled",
+            CodWatchdogStatus.Healthy => "COD health monitoring active",
+            CodWatchdogStatus.NoDataWarning => "Collection is delayed",
+            CodWatchdogStatus.NoDataConfirmed or CodWatchdogStatus.CheckingGameState => "Checking Call of Duty health",
+            CodWatchdogStatus.RecoveryCooldown => "Recovery cooldown active",
+            CodWatchdogStatus.Unavailable => "Available for Battle.net only",
+            _ => status.Detail
+        };
+    }
     public void SetUpdateStatus(string status, DateTimeOffset? checkedAt)
     {
         UpdateDefaultStatusPanel.Visibility = Visibility.Collapsed;
@@ -169,9 +183,10 @@ public partial class MainWindow : Window
         if (remaining <= TimeSpan.Zero) { NextSyncText.Text = "Starting..."; return; }
         NextSyncText.Text = $"Next sync in {(int)remaining.TotalMinutes:D2}:{remaining.Seconds:D2}";
     }
-    private CollectorSettings Current => new(Enabled.IsChecked == true, Startup.IsChecked == true);
+    private CollectorSettings Current => new(Enabled.IsChecked == true, Startup.IsChecked == true, KeepCodRunning.IsChecked == true);
     private void EnabledChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
     private void StartupChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
+    private void KeepCodRunningChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
     private async void SyncNow(object sender, RoutedEventArgs e) => await app.SyncNowAsync();
     private void CopyBuild(object sender, RoutedEventArgs e) => app.CopyBuildInfo();
     public void ShowSettings() => SettingsBackdrop.Visibility = Visibility.Visible;

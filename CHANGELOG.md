@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.19-alpha
+
+- Add an opt-in Battle.net-only Call of Duty recovery watchdog for dedicated collector stations.
+
 ## 0.1.18-alpha
 
 - Prioritize Resurgence synchronization before Multiplayer and Battle Royale.
