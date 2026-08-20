@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.19-alpha
+
+- Add Battle.net Season 5 Reloaded layout support.
+
 ## 0.1.18-alpha
 
 - Prioritize Resurgence synchronization before Multiplayer and Battle Royale.

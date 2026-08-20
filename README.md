@@ -52,7 +52,7 @@ The helper accepts an already-provided `CODMUNITY_RANKED_SYNC_TOKEN_BUILD` envir
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.18-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.19-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.
