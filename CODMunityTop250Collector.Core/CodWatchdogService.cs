@@ -9,6 +9,17 @@ public enum CodWatchdogStatus { Disabled, Healthy, NoDataWarning, NoDataConfirme
 public sealed record CodWatchdogSnapshot(CodWatchdogStatus Status, string Detail = "");
 public enum WatchdogCollectionHealth { Healthy, Warning, Confirmed }
 
+public sealed class BattleNetLaunchGate
+{
+    private bool requested;
+    public bool TryRequestUri(bool battleNetAppRunning)
+    {
+        if (battleNetAppRunning || requested) return false;
+        requested = true;
+        return true;
+    }
+    public void Reset() => requested = false;
+}
 public static class CodWatchdogPolicy
 {
     public static readonly TimeSpan WarningAfter = TimeSpan.FromMinutes(5);
@@ -20,6 +31,8 @@ public static class CodWatchdogPolicy
         return age <= WarningAfter ? WatchdogCollectionHealth.Healthy : age < ConfirmAfter ? WatchdogCollectionHealth.Warning : WatchdogCollectionHealth.Confirmed;
     }
     public static bool IsPlayConfidenceSufficient(double confidence) => confidence >= ActivePlayThreshold;
+    public static bool RequiresWindowRestore(bool windowExists, bool windowMinimized) => windowExists && windowMinimized;
+    public static bool IsWindowUsable(bool windowExists, bool windowMinimized) => windowExists && !windowMinimized;
     public static Point WindowRelativeToScreen(int windowLeft, int windowTop, PlayMatch match) => new(windowLeft + match.CenterX, windowTop + match.CenterY);
 }
 
@@ -39,6 +52,7 @@ public sealed class CodWatchdogService
     private readonly AppLogger log;
     private readonly string templatePath;
     private readonly RecoveryBudget budget = new();
+    private readonly BattleNetLaunchGate battleNetLaunchGate = new();
     private WatchdogPhase phase;
     private CodWatchdogSnapshot snapshot = new(CodWatchdogStatus.Disabled);
     private DateTimeOffset deadlineUtc;
@@ -53,6 +67,9 @@ public sealed class CodWatchdogService
     private bool staleRecovery;
     private int? observedCodPid;
     private bool? lastEnabled;
+    private bool? lastBattleNetAppRunning;
+    private int? lastBattleNetPid;
+    private IntPtr lastBattleNetWindow;
 
     public event Action<CodWatchdogSnapshot>? Changed;
     public CodWatchdogSnapshot Snapshot => snapshot;
@@ -187,22 +204,45 @@ public sealed class CodWatchdogService
             SetStatus(CodWatchdogStatus.WaitingForCod, "Starting Call of Duty"); return Task.CompletedTask;
         }
         if (phase == WatchdogPhase.Idle) log.Write("WATCHDOG_RECOVERY_START", "reason=CodMissing");
-        var primary = FindPrimaryBattleNetWindow();
-        if (primary is null)
+        var battleNet = InspectBattleNet();
+        LogBattleNetObservation(battleNet);
+        if (!battleNet.AppRunning)
         {
-            if (!BattleNetAppRunning())
+            if (battleNetLaunchGate.TryRequestUri(battleNet.AppRunning))
             {
-                if (phase != WatchdogPhase.WaitingForBattleNet)
+                phase = WatchdogPhase.WaitingForBattleNet; deadlineUtc = now.Add(BattleNetTimeout);
+                log.Write("WATCHDOG_BNET_LAUNCH_REQUESTED", "uri=battlenet://game/auks");
+                try
                 {
-                    phase = WatchdogPhase.WaitingForBattleNet; deadlineUtc = now.Add(BattleNetTimeout);
-                    log.Write("WATCHDOG_BNET_LAUNCH_REQUESTED", "uri=battlenet://game/auks");
-                    try { Process.Start(new ProcessStartInfo("battlenet://game/auks") { UseShellExecute = true }); }
-                    catch { return Fail(now, "BattleNetDidNotOpen"); }
+                    var started = Process.Start(new ProcessStartInfo("battlenet://game/auks") { UseShellExecute = true });
+                    log.Write("WATCHDOG_BNET_LAUNCH_RESULT", "success=true");
+                    started?.Dispose();
                 }
-                if (now >= deadlineUtc) return Fail(now, "BattleNetDidNotOpen");
-                SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Starting Battle.net"); return Task.CompletedTask;
+                catch
+                {
+                    log.Write("WATCHDOG_BNET_LAUNCH_RESULT", $"success=false win32Error={Marshal.GetLastWin32Error()}");
+                    return Fail(now, "BattleNetDidNotOpen");
+                }
             }
             if (phase != WatchdogPhase.WaitingForBattleNet) { phase = WatchdogPhase.WaitingForBattleNet; deadlineUtc = now.Add(BattleNetTimeout); }
+            if (now >= deadlineUtc) return Fail(now, "BattleNetDidNotOpen");
+            log.Write("WATCHDOG_WAITING_FOR_BNET"); SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Starting Battle.net"); return Task.CompletedTask;
+        }
+        var primary = battleNet.PrimaryWindow;
+        if (primary is null)
+        {
+            if (phase != WatchdogPhase.WaitingForBattleNet) { phase = WatchdogPhase.WaitingForBattleNet; deadlineUtc = now.Add(BattleNetTimeout); }
+            if (now >= deadlineUtc) return Fail(now, "PrimaryWindowUnavailable");
+            log.Write("WATCHDOG_WAITING_FOR_BNET"); SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Waiting for Battle.net"); return Task.CompletedTask;
+        }
+        if (primary is { } minimizedWindow && CodWatchdogPolicy.RequiresWindowRestore(true, minimizedWindow.Minimized) && !RestoreBattleNetWindow(minimizedWindow))
+        {
+            if (now >= deadlineUtc) return Fail(now, "PrimaryWindowUnavailable");
+            SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Restoring Battle.net"); return Task.CompletedTask;
+        }
+        battleNet = InspectBattleNet(); LogBattleNetObservation(battleNet); primary = battleNet.PrimaryWindow;
+        if (primary is null || primary.Value.Minimized)
+        {
             if (now >= deadlineUtc) return Fail(now, "PrimaryWindowUnavailable");
             SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Waiting for Battle.net"); return Task.CompletedTask;
         }
@@ -218,8 +258,8 @@ public sealed class CodWatchdogService
             if (now >= deadlineUtc) return Fail(now, "PlayNotConfident");
             SetStatus(CodWatchdogStatus.WaitingForBattleNet, "Waiting for Play"); return Task.CompletedTask;
         }
-        // Re-acquire immediately before the one permitted click.
-        if (!scheduler.Settings.KeepCallOfDutyRunning || !scheduler.Settings.CollectorEnabled || monitor.FindSinglePid() is not null || (primary = FindPrimaryBattleNetWindow()) is null || !PlayTemplateMatcher.TryFind(templatePath, primary.Value, out match, out confidence) || !CodWatchdogPolicy.IsPlayConfidenceSufficient(confidence))
+        battleNet = InspectBattleNet(); primary = battleNet.PrimaryWindow;
+        if (!scheduler.Settings.KeepCallOfDutyRunning || !scheduler.Settings.CollectorEnabled || monitor.FindSinglePid() is not null || primary is null || primary.Value.Minimized || !PlayTemplateMatcher.TryFind(templatePath, primary.Value, out match, out confidence) || !CodWatchdogPolicy.IsPlayConfidenceSufficient(confidence))
         {
             log.Write("WATCHDOG_RECOVERY_CANCELLED", "reason=PlayRevalidationFailed"); ResetAttempt(); return Task.CompletedTask;
         }
@@ -228,7 +268,6 @@ public sealed class CodWatchdogService
         if (!delivery.Sent) return Fail(now, "ClickFailed");
         log.Write("WATCHDOG_PLAY_CLICK_SENT"); phase = WatchdogPhase.WaitingForCod; deadlineUtc = now.Add(CodStartTimeout); SetStatus(CodWatchdogStatus.WaitingForCod, "Starting Call of Duty"); return Task.CompletedTask;
     }
-
     private Task Fail(DateTimeOffset now, string reason)
     {
         phase = WatchdogPhase.Failed; retryAfterUtc = now.Add(RetryDelay); budget.RecordFailure(now);
@@ -238,16 +277,43 @@ public sealed class CodWatchdogService
     private static DateTimeOffset? ProcessStartedAt(int pid) { try { using var p = Process.GetProcessById(pid); return p.StartTime.ToUniversalTime(); } catch { return null; } }
     private static bool RequestClose(int pid) { try { using var p = Process.GetProcessById(pid); return p.CloseMainWindow(); } catch { return false; } }
     private static bool TerminatePid(int pid) { try { using var p = Process.GetProcessById(pid); p.Kill(entireProcessTree: false); return true; } catch { return false; } }
-    private static bool BattleNetAppRunning() => HasProcess("Battle.net") || HasProcess("Battle.net Launcher");
-    private static bool HasProcess(string name) { var processes = Process.GetProcessesByName(name); try { return processes.Length > 0; } finally { foreach (var process in processes) process.Dispose(); } }
-    private static BattleNetWindow? FindPrimaryBattleNetWindow() => Processes("Battle.net").Concat(Processes("Battle.net Launcher")).Select(p => ToWindow(p)).Where(p => p is not null).Cast<BattleNetWindow>().OrderByDescending(p => p.Title.Equals("Battle.net", StringComparison.OrdinalIgnoreCase)).FirstOrDefault();
-    private static IEnumerable<Process> Processes(string name) => Process.GetProcessesByName(name);
-    private static BattleNetWindow? ToWindow(Process process)
+    private BattleNetObservation InspectBattleNet()
     {
-        try { var handle = process.MainWindowHandle; var title = process.MainWindowTitle; return handle != IntPtr.Zero && Native.IsWindowVisible(handle) && title.Contains("Battle.net", StringComparison.OrdinalIgnoreCase) ? new(process.Id, handle, title) : null; }
-        catch { return null; } finally { process.Dispose(); }
+        var processes = Process.GetProcessesByName("Battle.net").Concat(Process.GetProcessesByName("Battle.net Launcher")).ToArray();
+        try
+        {
+            var candidates = new List<BattleNetWindow>();
+            foreach (var process in processes)
+            {
+                try
+                {
+                    var handle = process.MainWindowHandle; var title = process.MainWindowTitle;
+                    if (handle != IntPtr.Zero && title.Contains("Battle.net", StringComparison.OrdinalIgnoreCase))
+                        candidates.Add(new(process.Id, handle, title, Native.IsWindowVisible(handle), Native.IsIconic(handle)));
+                }
+                catch { }
+            }
+            var primary = candidates.OrderByDescending(candidate => candidate.Title.Equals("Battle.net", StringComparison.OrdinalIgnoreCase)).ThenByDescending(candidate => candidate.Visible).ThenBy(candidate => candidate.Pid).FirstOrDefault();
+            return new(processes.Length > 0, processes.FirstOrDefault()?.Id, primary.Handle == IntPtr.Zero ? null : primary);
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
     }
-    private void ResetAttempt() { phase = WatchdogPhase.Idle; staleConfirmed = false; checkingGameState = false; forceKillAttempted = false; startedCodUtc = null; recoveryPid = null; staleRecovery = false; deadlineUtc = default; closeDeadlineUtc = default; }
+    private void LogBattleNetObservation(BattleNetObservation observation)
+    {
+        if (lastBattleNetAppRunning != observation.AppRunning) { lastBattleNetAppRunning = observation.AppRunning; log.Write("WATCHDOG_BNET_APP_STATE", $"running={observation.AppRunning.ToString().ToLowerInvariant()}"); }
+        if (observation.AppRunning && lastBattleNetPid != observation.ProcessPid) { lastBattleNetPid = observation.ProcessPid; log.Write("WATCHDOG_BNET_APP_DETECTED", $"pid={observation.ProcessPid?.ToString() ?? "unknown"}"); }
+        var handle = observation.PrimaryWindow?.Handle ?? IntPtr.Zero;
+        if (handle != IntPtr.Zero && handle != lastBattleNetWindow) { lastBattleNetWindow = handle; log.Write("WATCHDOG_BNET_WINDOW_FOUND", $"hwnd=0x{handle.ToInt64():X}"); }
+    }
+    private bool RestoreBattleNetWindow(BattleNetWindow window)
+    {
+        log.Write("WATCHDOG_BNET_WINDOW_MINIMIZED"); Native.ShowWindow(window.Handle, 9); Thread.Sleep(200);
+        if (Native.IsIconic(window.Handle) || !Native.TryGetWindowRect(window.Handle, out _)) { log.Write("WATCHDOG_BNET_WINDOW_RESTORE_FAILED"); return false; }
+        log.Write("WATCHDOG_BNET_WINDOW_RESTORED");
+        if (!Native.SetForeground(window.Handle)) log.Write("WATCHDOG_FOREGROUND_REQUEST_REJECTED", $"win32Error={Marshal.GetLastWin32Error()}");
+        return true;
+    }
+    private void ResetAttempt() { battleNetLaunchGate.Reset(); phase = WatchdogPhase.Idle; staleConfirmed = false; checkingGameState = false; forceKillAttempted = false; startedCodUtc = null; recoveryPid = null; staleRecovery = false; deadlineUtc = default; closeDeadlineUtc = default; }
     private void SetEnabledLogged(bool enabled) { if (lastEnabled == enabled) return; lastEnabled = enabled; log.Write(enabled ? "WATCHDOG_ENABLED" : "WATCHDOG_DISABLED"); }
     private void SetStatus(CodWatchdogStatus status, string detail) { var value = new CodWatchdogSnapshot(status, detail); if (value == snapshot) return; var old = snapshot; snapshot = value; Changed?.Invoke(value); log.Write("WATCHDOG_STATE", $"old={old.Status} new={status}"); if (status == CodWatchdogStatus.RecoveryCooldown) log.Write("WATCHDOG_COOLDOWN"); }
     private enum WatchdogPhase { Idle, WaitingForBattleNet, WaitingForPlay, WaitingForCod, WaitingForData, WaitingForCodClose, Failed }
@@ -260,7 +326,8 @@ public sealed class RecoveryBudget
     public bool IsCoolingDown(DateTimeOffset now) { while (failures.TryPeek(out var old) && now - old > TimeSpan.FromMinutes(30)) failures.Dequeue(); if (cooldownUntil is { } until && until <= now) cooldownUntil = null; return cooldownUntil is { } active && active > now; }
 }
 
-public readonly record struct BattleNetWindow(int Pid, IntPtr Handle, string Title);
+public readonly record struct BattleNetWindow(int Pid, IntPtr Handle, string Title, bool Visible, bool Minimized);
+internal readonly record struct BattleNetObservation(bool AppRunning, int? ProcessPid, BattleNetWindow? PrimaryWindow);
 public readonly record struct PlayMatch(int X, int Y, int Width, int Height, double Confidence) { public int CenterX => X + Width / 2; public int CenterY => Y + Height / 2; }
 public sealed record ClickDiagnostic(string Event, string Detail);
 public sealed record PlayClickDelivery(bool Sent, IReadOnlyList<ClickDiagnostic> Diagnostics);

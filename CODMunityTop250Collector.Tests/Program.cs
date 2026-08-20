@@ -130,6 +130,14 @@ static void WatchdogPolicyTests()
     if (CodWatchdogPolicy.IsPlayConfidenceSufficient(.949) || !CodWatchdogPolicy.IsPlayConfidenceSufficient(.950)) throw new Exception("watchdog active click threshold");
     var point = CodWatchdogPolicy.WindowRelativeToScreen(100, 200, new PlayMatch(40, 50, 20, 10, .99));
     if (point.X != 150 || point.Y != 255) throw new Exception("watchdog window-relative coordinates");
+    var launchGate = new BattleNetLaunchGate();
+    if (!launchGate.TryRequestUri(false)) throw new Exception("closed Battle.net must request launcher URI");
+    if (launchGate.TryRequestUri(false)) throw new Exception("launcher URI must be requested once per attempt");
+    launchGate.Reset();
+    if (!launchGate.TryRequestUri(false)) throw new Exception("agent-only state must still request launcher URI");
+    if (launchGate.TryRequestUri(true)) throw new Exception("Battle.net process appearance must suppress duplicate URI");
+    if (!CodWatchdogPolicy.RequiresWindowRestore(true, true) || CodWatchdogPolicy.RequiresWindowRestore(true, false) || CodWatchdogPolicy.RequiresWindowRestore(false, true)) throw new Exception("minimized Battle.net restore decision");
+    if (!CodWatchdogPolicy.IsWindowUsable(true, false) || CodWatchdogPolicy.IsWindowUsable(true, true) || CodWatchdogPolicy.IsWindowUsable(false, false)) throw new Exception("Battle.net window usability decision");
     var budget = new RecoveryBudget();
     budget.RecordFailure(now); budget.RecordFailure(now.AddMinutes(1)); budget.RecordFailure(now.AddMinutes(2));
     if (!budget.IsCoolingDown(now.AddMinutes(2))) throw new Exception("watchdog recovery budget");
