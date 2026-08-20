@@ -273,7 +273,13 @@ function Get-BuildLayout {
     if ($null -eq $collection) { return $null }
     $property = $collection.PSObject.Properties[[string]$Identity.Value]
     if ($null -eq $property) { return $null }
-    return $property.Value
+    $layout = $property.Value
+    if ($layout.exporterSet -eq "bnet-dynamic") {
+        $definition = $Manifest.battlenetLayoutDefinitions.PSObject.Properties[[string]$layout.layout]
+        if ($null -eq $definition) { return $null }
+        return [pscustomobject]@{ platform = $layout.platform; layout = $layout.layout; exporterSet = $layout.exporterSet; bnetDefinition = $definition.Value }
+    }
+    return $layout
 }
 
 function Get-Datasets {

@@ -13,7 +13,7 @@
     "97413B95AA94A9694690BA70B16189E4827E2B363850F873387E8A88101D4FE4": {
       "platform": "battlenet",
       "layout": "bnet-20260820",
-      "exporterSet": "bnet"
+      "exporterSet": "bnet-dynamic"
     },
     "0D40348074F8CAFBDF3F76BFBBC5193BF7E4A31146F7225EFF5C7706436239D9": {
       "platform": "steam",

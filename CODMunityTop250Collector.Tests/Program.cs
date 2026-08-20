@@ -171,6 +171,9 @@ static void EngineManagedIdentityContractTests()
     var engine = Path.Combine(AppContext.BaseDirectory, "engine");
     var orchestrator = File.ReadAllText(Path.Combine(engine, "top250_orchestrator.ps1"));
     if (!orchestrator.Contains("-VerifiedBuildSha256", StringComparison.Ordinal) || !orchestrator.Contains("ProcessPriorityClass]::BelowNormal", StringComparison.Ordinal)) throw new Exception("managed engine identity or exporter priority contract");
+    var layouts = JsonDocument.Parse(File.ReadAllText(Path.Combine(engine, "build_layouts.json")));
+    var season5 = layouts.RootElement.GetProperty("sha256Builds").GetProperty("97413B95AA94A9694690BA70B16189E4827E2B363850F873387E8A88101D4FE4");
+    if (season5.GetProperty("layout").GetString() != "bnet-20260820" || season5.GetProperty("exporterSet").GetString() != "bnet-dynamic" || !orchestrator.Contains("$Manifest.battlenetLayoutDefinitions", StringComparison.Ordinal)) throw new Exception("static Battle.net layout must route through dynamic exporter");
     foreach (var exporter in new[]
     {
         "exporters/bnet/top250_mp.ps1", "exporters/bnet/top250_br.ps1", "exporters/bnet/top250_resurgence.ps1",

@@ -3,7 +3,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="CODMunity Top 250 Collector"
            Manufacturer="CODMunity"
-           Version="0.1.19"
+           Version="0.1.20"
            UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
            Scope="perUser"
            InstallerVersion="500">

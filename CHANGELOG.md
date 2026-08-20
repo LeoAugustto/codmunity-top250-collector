@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.20-alpha
+
+- Route the Battle.net Season 5 Reloaded layout through the dynamic exporter.
+
 ## 0.1.19-alpha
 
 - Add Battle.net Season 5 Reloaded layout support.
