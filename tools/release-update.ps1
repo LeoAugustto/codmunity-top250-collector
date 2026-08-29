@@ -22,8 +22,16 @@ $script:OciReleaseBase = 'https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.c
 $script:AlphaVersionPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha$'
 
 # Reuse the fixed OCI target, verify gate, and commit-last upload ordering.
+# Dot-sourced helpers have their own param blocks, so preserve this script''s
+# invocation values before loading helper functions into the same scope.
+$releaseInvocationVersion = $Version
+$releaseInvocationNotes = $ReleaseNotes
+$releaseInvocationMinimumUpdaterVersion = $MinimumUpdaterVersion
 . $script:PublishScript -NoInvoke
 . $script:GitHubMirrorScript -NoInvoke
+$Version = $releaseInvocationVersion
+$ReleaseNotes = $releaseInvocationNotes
+$MinimumUpdaterVersion = $releaseInvocationMinimumUpdaterVersion
 
 function Assert-AlphaVersion {
     param([Parameter(Mandatory)][string]$Value, [Parameter(Mandatory)][string]$Name)
