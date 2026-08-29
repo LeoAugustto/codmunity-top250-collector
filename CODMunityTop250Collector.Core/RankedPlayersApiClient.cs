@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using CODMunityTop250Collector.Diagnostics;
 
 namespace CODMunityTop250Collector.Core;
 
@@ -105,8 +106,8 @@ public sealed class RankedPlayersApiClient : IDisposable
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !token.IsCancellationRequested)
             {
-                if (attempt == 0) { log.Write("API_SYNC_RETRY", $"mode={mode} reason={ex.GetType().Name}"); continue; }
-                log.Write("API_SYNC_FAILED", $"mode={mode} reason={ex.GetType().Name}"); return new(ApiSyncState.Failed, Reason: ex.GetType().Name);
+                var diagnostic = NetworkFailureDiagnostics.Format(ex, token); if (attempt == 0) { log.Write("API_SYNC_RETRY", $"mode={mode} attempt={attempt + 1} {diagnostic}"); continue; }
+                log.Write("API_SYNC_FAILED", $"mode={mode} durationMs={Stopwatch.GetElapsedTime(started).Milliseconds} {diagnostic}"); return new(ApiSyncState.Failed, Reason: ex.GetType().Name);
             }
         }
         return new(ApiSyncState.Failed);

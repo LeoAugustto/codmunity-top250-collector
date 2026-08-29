@@ -1,4 +1,5 @@
 using CODMunityTop250Collector.Core;
+using CODMunityTop250Collector.Diagnostics;
 using CODMunityTop250Collector.ReleaseTool;
 using CODMunityTop250Collector.App;
 using CODMunityTop250Collector.UpdateHost;
@@ -9,6 +10,8 @@ using System.Globalization;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,8 +23,10 @@ try
     File.WriteAllText(CollectorPaths.Settings, "{\"CollectorEnabled\":true,\"StartWithWindows\":false,\"HistoryRetentionDays\":7}");
     if (store.Load() != new CollectorSettings(true, false)) throw new Exception("legacy settings compatibility");
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
-    var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
-    var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY") throw new Exception("status parsing");
+    var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
+    var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.21-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.21-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
     var ptBr = CultureInfo.GetCultureInfo("pt-BR");
@@ -30,6 +35,8 @@ try
     var enUsStatus = localHydratedTime.ToString("G", enUs);
     var ptBrCard = localHydratedTime.ToString("g", ptBr);
     if (!ptBrStatus.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrStatus.Contains(localHydratedTime.ToString("T", ptBr)) || !enUsStatus.Contains(localHydratedTime.ToString("d", enUs)) || !enUsStatus.Contains(localHydratedTime.ToString("T", enUs)) || !ptBrCard.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrCard.Contains(localHydratedTime.ToString("t", ptBr))) throw new Exception("localized timestamp formatting");
+    StartupRegistrationTests();
+    InstallerLaunchContractTests();
     ReleaseSigningTests(root);
     PrivateUpdaterTests(root);
     AutomaticUpdateTests(root);
@@ -40,9 +47,45 @@ try
     SchedulerBuildIdentityIntegrationTests(log).GetAwaiter().GetResult();
     SchedulerApiPriorityTests(log).GetAwaiter().GetResult();
     EngineManagedIdentityContractTests();
-    Console.WriteLine("PASS settings compatibility, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
+    Console.WriteLine("PASS settings compatibility, startup registration reconciliation, installer launch contract, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
 }
 finally { CollectorPaths.RootOverride = null; Directory.Delete(root, true); }
+
+
+
+static void InstallerLaunchContractTests()
+{
+    var installerDirectory = Path.Combine(AppContext.BaseDirectory, "Installer");
+    var msi = File.ReadAllText(Path.Combine(installerDirectory, "Package.wxs"));
+    if (!msi.Contains("CustomAction Id=\"LaunchCollector\" FileRef=\"CollectorExe\"", StringComparison.Ordinal) ||
+        !msi.Contains("WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND UILevel &gt;= 4", StringComparison.Ordinal) ||
+        msi.Contains("WIX_UPGRADE_DETECTED", StringComparison.Ordinal)) throw new Exception("MSI launch contract");
+
+    var bundle = File.ReadAllText(Path.Combine(installerDirectory, "Bundle.wxs"));
+    if (!bundle.Contains("LaunchTarget=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\\CODMunityTop250Collector.exe\"", StringComparison.Ordinal) ||
+        !bundle.Contains("LaunchWorkingFolder=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\"", StringComparison.Ordinal)) throw new Exception("Setup launch target contract");
+}
+
+static void StartupRegistrationTests()
+{
+    const string currentExecutable = @"C:\Program Files\CODMunity\CODMunityTop250Collector.exe";
+    if (WindowsStartupRegistration.FormatCommand(currentExecutable) != @"""C:\Program Files\CODMunity\CODMunityTop250Collector.exe""") throw new Exception("startup command quoting");
+
+    var registration = new FakeStartupRegistration();
+    var applier = new StartupSettingsApplier(registration);
+    var initial = new CollectorSettings(CollectorEnabled: true, StartWithWindows: false);
+    var settingsOn = initial with { StartWithWindows = true };
+    if (applier.Apply(initial, settingsOn, currentExecutable) != StartupRegistrationResult.Registered || registration.Calls.Count != 1 || registration.Calls[0] != (true, currentExecutable)) throw new Exception("Settings startup enable registration");
+
+    var trayOff = settingsOn with { StartWithWindows = false };
+    if (applier.Apply(settingsOn, trayOff, currentExecutable) != StartupRegistrationResult.Removed || registration.Calls.Count != 2 || registration.Calls[1] != (false, currentExecutable)) throw new Exception("tray startup disable shared registration");
+
+    var unrelatedCollectorChange = trayOff with { CollectorEnabled = false };
+    if (applier.Apply(trayOff, unrelatedCollectorChange, currentExecutable) is not null || registration.Calls.Count != 2) throw new Exception("unrelated collector setting changed startup registration");
+
+    registration.NextResult = StartupRegistrationResult.Repaired;
+    if (applier.Apply(settingsOn, settingsOn, currentExecutable, reconcileOnStartup: true) != StartupRegistrationResult.Repaired || registration.Calls.Count != 3 || registration.Calls[2] != (true, currentExecutable)) throw new Exception("startup registration reconciliation");
+}
 
 static async Task ApiSyncTests(AppLogger log)
 {
@@ -86,6 +129,19 @@ static async Task ApiSyncTests(AppLogger log)
     if (runtimeFirst.GetToken() != "runtime-token" || embeddedFallback.GetToken() != "embedded-token") throw new Exception("token provider priority");
     using var unconfigured = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
     if ((await unconfigured.SyncAsync("br", rows, CancellationToken.None)).State != ApiSyncState.NotConfigured) throw new Exception("missing API token");
+    var networkFailure = new HttpRequestException("Authorization: Bearer synthetic-token", new SocketException((int)SocketError.ConnectionRefused)); // RELEASE_SECRET_AUDIT_SYNTHETIC_FIXTURE
+    var diagnostic = NetworkFailureDiagnostics.Format(networkFailure, CancellationToken.None);
+    if (!diagnostic.Contains("type=HttpRequestException", StringComparison.Ordinal) || !diagnostic.Contains("innerType=SocketException", StringComparison.Ordinal) || !diagnostic.Contains("innerSocketError=ConnectionRefused", StringComparison.Ordinal) || diagnostic.Contains("synthetic-token", StringComparison.OrdinalIgnoreCase)) throw new Exception("network diagnostic sanitization");
+    using var externalCancellation = new CancellationTokenSource();
+    externalCancellation.Cancel();
+    var externalCancellationDiagnostic = NetworkFailureDiagnostics.Format(new TaskCanceledException("cancelled"), externalCancellation.Token);
+    if (!externalCancellationDiagnostic.Contains("cancellation=external", StringComparison.Ordinal)) throw new Exception("external cancellation diagnostics");
+    var authenticationDiagnostic = NetworkFailureDiagnostics.Format(new HttpRequestException("TLS failure", new AuthenticationException("certificate failed")), CancellationToken.None);
+    if (!authenticationDiagnostic.Contains("innerAuthenticationType=AuthenticationException", StringComparison.Ordinal) || !authenticationDiagnostic.Contains("innerMessage=\"certificate failed\"", StringComparison.Ordinal)) throw new Exception("authentication diagnostics");
+    using var failedClient = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, new FakeHandler(_ => throw networkFailure));
+    if ((await failedClient.SyncAsync("mp", rows, CancellationToken.None)).State != ApiSyncState.Failed) throw new Exception("network failure state");
+    var appLog = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
+    if (!appLog.Contains("API_SYNC_FAILED", StringComparison.Ordinal) || !appLog.Contains("innerSocketError=ConnectionRefused", StringComparison.Ordinal) || appLog.Contains("synthetic-token", StringComparison.OrdinalIgnoreCase)) throw new Exception("API failure diagnostics logging");
 }
 
 static async Task BuildIdentityCacheTests(AppLogger log)
@@ -221,7 +277,7 @@ static async Task SchedulerApiPriorityTests(AppLogger log)
         var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(new string('B', 64)), log));
         await scheduler.SyncNowAsync(CancellationToken.None);
         if (!failureHandler.Modes.SequenceEqual(["resurgence", "mp", "br"])) throw new Exception("Resurgence failure blocked lower-priority modes");
-        if (scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.Resurgence?.ApiSync != ApiSyncState.Failed || scheduler.Snapshot.Mp?.ApiSync != ApiSyncState.Ok || scheduler.Snapshot.Br?.ApiSync != ApiSyncState.Ok) throw new Exception("API failure changed collection result or independent statuses");
+        if (scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.Resurgence?.ApiSync != ApiSyncState.Failed || scheduler.Snapshot.Resurgence?.PlayerRows?.Count != 250 || scheduler.Snapshot.Mp?.ApiSync != ApiSyncState.Ok || scheduler.Snapshot.Br?.ApiSync != ApiSyncState.Ok) throw new Exception("API failure changed collection result or independent statuses");
     }
 }
 
@@ -383,10 +439,17 @@ static void PrivateUpdaterTests(string root)
     {
         if (signatureNotPublishedClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None || !signatureNotPublishedEvents.Contains("UPDATE_CHECK_NOT_PUBLISHED")) throw new Exception("signature 404 not treated as not-published");
     }
-    var timeoutEvents = new List<string>();
-    using (var timeoutClient = new PrivateUpdateClient(publicDer, (evt, _) => timeoutEvents.Add(evt), new FakeHandler(_ => throw new TaskCanceledException()), expectedFingerprint))
+    var timeoutEvents = new List<(string Event, string? Detail)>();
+    using (var timeoutClient = new PrivateUpdateClient(publicDer, (evt, detail) => timeoutEvents.Add((evt, detail)), new FakeHandler(_ => throw new TaskCanceledException()), expectedFingerprint))
     {
-        if (timeoutClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.Failed || !timeoutEvents.Contains("UPDATE_CHECK_FAILED")) throw new Exception("timeout not treated separately");
+        if (timeoutClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.Failed || !timeoutEvents.Any(e => e.Event == "UPDATE_CHECK_FAILED" && e.Detail?.Contains("cancellation=timeout", StringComparison.Ordinal) == true)) throw new Exception("timeout diagnostics");
+    }
+    var updaterFailureEvents = new List<(string Event, string? Detail)>();
+    using (var updaterFailureClient = new PrivateUpdateClient(publicDer, (evt, detail) => updaterFailureEvents.Add((evt, detail)), new FakeHandler(_ => throw new HttpRequestException("Authorization: Bearer synthetic-token", new SocketException((int)SocketError.ConnectionRefused))), expectedFingerprint)) // RELEASE_SECRET_AUDIT_SYNTHETIC_FIXTURE
+    {
+        if (updaterFailureClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.Failed) throw new Exception("updater network failure state");
+        var detail = updaterFailureEvents.Single(e => e.Event == "UPDATE_CHECK_FAILED").Detail ?? string.Empty;
+        if (!detail.Contains("innerSocketError=ConnectionRefused", StringComparison.Ordinal) || detail.Contains("synthetic-token", StringComparison.OrdinalIgnoreCase)) throw new Exception("updater diagnostics sanitization");
     }
     if (UpdateHostArguments.TryParse(Array.Empty<string>(), out _)) throw new Exception("UpdateHost accepted empty arguments");
     if (UpdateHostArguments.TryParse(new[] { "--parent-pid", "1", "--msi", "x", "--sha256", "ABC", "--app", "x" }, out _)) throw new Exception("UpdateHost accepted invalid arguments");
@@ -519,6 +582,20 @@ sealed class PriorityEngineRunner(AppLogger log) : EngineRunner(log)
         var players = Enumerable.Range(1, 250).Select(position => new { position, sr = 30000 - position, name = $"player-{position}" }).ToArray();
         var json = JsonSerializer.Serialize(new { capturedAt, platform = "battlenet", layout = "bnet-current", cycleStatus = "OK", datasets = new { mp = new { status = "OK", rows = 250, capturedAt, players }, br = new { status = "OK", rows = 250, capturedAt, players }, resurgence = new { status = "OK", rows = 250, capturedAt, players } } });
         return Task.FromResult((0, json, string.Empty));
+    }
+}
+
+
+sealed class FakeStartupRegistration : IStartupRegistration
+{
+    public List<(bool Enabled, string ExecutablePath)> Calls { get; } = [];
+    public StartupRegistrationResult? NextResult { get; set; }
+    public StartupRegistrationResult Reconcile(bool enabled, string executablePath)
+    {
+        Calls.Add((enabled, executablePath));
+        var result = NextResult ?? (enabled ? StartupRegistrationResult.Registered : StartupRegistrationResult.Removed);
+        NextResult = null;
+        return result;
     }
 }
 

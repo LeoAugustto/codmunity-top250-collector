@@ -15,8 +15,8 @@ $msiProject = Join-Path $projectRoot 'Installer.Wix\CODMunityTop250Collector.Ins
 $bundleProject = Join-Path $projectRoot 'Installer.Bundle\CODMunityTop250Collector.Bundle.wixproj'
 $portableDirectory = Join-Path $projectRoot 'dist\portable'
 $appDll = Join-Path $portableDirectory 'CODMunityTop250Collector.dll'
-$msi = Join-Path $projectRoot 'dist\msi\CODMunityTop250Collector-0.1.20-alpha-win-x64.msi'
-$setup = Join-Path $projectRoot 'dist\setup\CODMunityTop250Collector-0.1.20-alpha-Setup.exe'
+$msi = Join-Path $projectRoot 'dist\msi\CODMunityTop250Collector-0.1.21-alpha-win-x64.msi'
+$setup = Join-Path $projectRoot 'dist\setup\CODMunityTop250Collector-0.1.21-alpha-Setup.exe'
 $resourceName = 'CODMunityTop250Collector.App.EmbeddedRankedSyncToken'
 $succeeded = $false
 $credential = 'NOT PRESENT'
@@ -93,7 +93,7 @@ try {
 }
 catch {
     Write-Output 'BUILD CLOSED BETA: FAILED'
-    Write-Output ('Version: 0.1.20-alpha')
+    Write-Output ('Version: 0.1.21-alpha')
     exit 1
 }
 finally {
@@ -103,7 +103,7 @@ finally {
 
 if ($succeeded) {
     Write-Output 'BUILD CLOSED BETA: OK'
-    Write-Output 'Version: 0.1.20-alpha'
+    Write-Output 'Version: 0.1.21-alpha'
     Write-Output ('Portable: ' + $portableDirectory)
     Write-Output ('MSI: ' + $msi)
     Write-Output ('Setup: ' + $setup)

@@ -3,14 +3,16 @@ using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using CODMunityTop250Collector.Core;
+using CODMunityTop250Collector.Diagnostics;
 using CODMunityTop250Collector.Updater;
 using Forms = System.Windows.Forms;
 
 namespace CODMunityTop250Collector.App;
 public partial class App : System.Windows.Application
 {
-    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private CollectorScheduler? scheduler; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
+    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private Forms.ToolStripMenuItem? trayCollectorEnabled; private Forms.ToolStripMenuItem? trayStartup; private bool updatingTraySettings; private CollectorScheduler? scheduler; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private StartupSettingsApplier? startupSettings; private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -20,7 +22,7 @@ public partial class App : System.Windows.Application
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\CODMunityTop250Collector.Show");
             if (!first) { showEvent.Set(); Shutdown(); return; }
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
-            log = new AppLogger(); log.Write("APP_START"); settingsStore = new SettingsStore(log); settings = settingsStore.Load();
+            log = new AppLogger(); log.Write("APP_START", $"runtimeVersion={Environment.Version} frameworkDescription=\"{RuntimeInformation.FrameworkDescription}\" osDescription=\"{RuntimeInformation.OSDescription}\" processArchitecture={RuntimeInformation.ProcessArchitecture}"); settingsStore = new SettingsStore(log); settings = settingsStore.Load(); startupSettings = new StartupSettingsApplier(new WindowsStartupRegistration()); ReconcileStartupRegistration(onStartup: true);
             var rankedApi = new RankedPlayersApiClient(new CompositeApiTokenProvider(new EnvironmentApiTokenProvider(), new EmbeddedRankedSyncTokenProvider()), log);
             scheduler = new CollectorScheduler(new CodProcessMonitor(), new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine")); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
             window = new MainWindow(this); window.SetVersion(AppVersion.Display); window.SetSettings(settings); CreateTray(); cts = new CancellationTokenSource();
@@ -41,11 +43,11 @@ public partial class App : System.Windows.Application
     {
         tray = new Forms.NotifyIcon { Icon = LoadTrayIcon(), Visible = true, Text = "CODMunity Collector | Waiting for Call of Duty" };
         var menu = new Forms.ContextMenuStrip(); menu.Items.Add("CODMunity Top 250 Collector", null, (_, _) => ShowWindow()); menu.Items.Add(new Forms.ToolStripSeparator());
-        var enabled = new Forms.ToolStripMenuItem("Collector Enabled") { Checked = settings.CollectorEnabled, CheckOnClick = true }; enabled.CheckedChanged += (_, _) => Save(settings with { CollectorEnabled = enabled.Checked }); menu.Items.Add(enabled);
+        trayCollectorEnabled = new Forms.ToolStripMenuItem("Collector Enabled") { Checked = settings.CollectorEnabled, CheckOnClick = true }; trayCollectorEnabled.CheckedChanged += (_, _) => { if (!updatingTraySettings) Save(settings with { CollectorEnabled = trayCollectorEnabled.Checked }); }; menu.Items.Add(trayCollectorEnabled);
         var sync = new Forms.ToolStripMenuItem("Sync Now"); sync.Click += async (_, _) => { if (scheduler is not null) await scheduler.SyncNowAsync(CancellationToken.None); }; menu.Items.Add(sync);
         menu.Items.Add("Open Status", null, (_, _) => ShowWindow());
         var checkUpdates = new Forms.ToolStripMenuItem("Check for updates"); checkUpdates.Click += async (_, _) => await CheckForUpdatesFromTrayAsync(); menu.Items.Add(checkUpdates);
-        var startup = new Forms.ToolStripMenuItem("Start with Windows") { Checked = settings.StartWithWindows, CheckOnClick = true }; startup.CheckedChanged += (_, _) => { StartupRegistration.Set(startup.Checked, Environment.ProcessPath!); Save(settings with { StartWithWindows = startup.Checked }); }; menu.Items.Add(startup);
+        trayStartup = new Forms.ToolStripMenuItem("Start with Windows") { Checked = settings.StartWithWindows, CheckOnClick = true }; trayStartup.CheckedChanged += (_, _) => { if (!updatingTraySettings) Save(settings with { StartWithWindows = trayStartup.Checked }); }; menu.Items.Add(trayStartup);
         menu.Items.Add("Exit", null, (_, _) => Shutdown()); tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => ShowWindow();
     }
     private System.Drawing.Icon LoadTrayIcon()
@@ -69,7 +71,41 @@ public partial class App : System.Windows.Application
         log?.Write("TRAY_ICON_FALLBACK", "Using SystemIcons.Application.");
         return System.Drawing.SystemIcons.Application;
     }
-    public void Save(CollectorSettings updated) { settings = updated.Normalized(); settingsStore!.Save(settings); scheduler!.UpdateSettings(settings); window?.SetSettings(settings); }
+    public void Save(CollectorSettings updated)
+    {
+        var previous = settings;
+        settings = updated.Normalized();
+        settingsStore!.Save(settings);
+        ReconcileStartupRegistration(previous);
+        scheduler!.UpdateSettings(settings);
+        window?.SetSettings(settings);
+        UpdateTraySettings();
+    }
+
+    private void ReconcileStartupRegistration(CollectorSettings? previous = null, bool onStartup = false)
+    {
+        try
+        {
+            var result = startupSettings!.Apply(previous ?? settings, settings, Environment.ProcessPath ?? string.Empty, onStartup);
+            if (result is null || (onStartup && result == StartupRegistrationResult.Unchanged)) return;
+            if (onStartup && settings.StartWithWindows) log?.Write("STARTUP_REGISTRATION_REPAIRED");
+            else if (settings.StartWithWindows) log?.Write("STARTUP_REGISTRATION_ENABLED");
+            else log?.Write("STARTUP_REGISTRATION_DISABLED");
+        }
+        catch (Exception ex) { log?.Write("STARTUP_REGISTRATION_FAILED", $"type={ex.GetType().Name}"); }
+    }
+
+    private void UpdateTraySettings()
+    {
+        if (tray is null) return;
+        updatingTraySettings = true;
+        try
+        {
+            if (trayCollectorEnabled is not null) trayCollectorEnabled.Checked = settings.CollectorEnabled;
+            if (trayStartup is not null) trayStartup.Checked = settings.StartWithWindows;
+        }
+        finally { updatingTraySettings = false; }
+    }
     public Task SyncNowAsync() => scheduler?.SyncNowAsync(CancellationToken.None) ?? Task.CompletedTask;
     public async Task CheckForUpdatesFromSettingsAsync() => await CheckForUpdatesAsync("settings", manual: true, CancellationToken.None);
     private async Task CheckForUpdatesFromTrayAsync()
@@ -94,7 +130,21 @@ public partial class App : System.Windows.Application
     }
     public void ShowWindow() { window!.Show(); window.Activate(); window.WindowState = WindowState.Normal; }
     public void HideWindow() => window?.Hide();
-    public void CopyBuildInfo() { try { System.Windows.Clipboard.SetText($"collectorVersion={AppVersion.Informational}"); } catch { } }
+    public void CopyBuildInfo()
+    {
+        try
+        {
+            var snapshot = scheduler?.Snapshot ?? new CollectorSnapshot(settings.CollectorEnabled);
+            System.Windows.Clipboard.SetText(CollectorSupportInfo.Format(
+                snapshot,
+                AppVersion.Informational,
+                Environment.Version.ToString(),
+                RuntimeInformation.FrameworkDescription,
+                RuntimeInformation.OSDescription,
+                RuntimeInformation.ProcessArchitecture.ToString()));
+        }
+        catch { }
+    }
     private async Task RunUpdateChecksAsync(CancellationToken token)
     {
         try
@@ -107,12 +157,12 @@ public partial class App : System.Windows.Application
                     if (await CheckForUpdatesAsync("automatic", manual: false, token)) return;
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-                catch (Exception ex) { log?.Write("UPDATE_CHECK_FAILED", ex.GetType().Name); }
+                catch (Exception ex) { log?.Write("UPDATE_CHECK_FAILED", NetworkFailureDiagnostics.Format(ex, token)); }
                 await Task.Delay(UpdateCheckSchedule.RecurringInterval, token);
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { log?.Write("UPDATE_CHECK_FAILED", ex.GetType().Name); }
+        catch (Exception ex) { log?.Write("UPDATE_CHECK_FAILED", NetworkFailureDiagnostics.Format(ex, token)); }
     }
     private async Task<bool> CheckForUpdatesAsync(string source, bool manual, CancellationToken token)
     {
@@ -161,7 +211,7 @@ public partial class App : System.Windows.Application
         catch (OperationCanceledException) when (token.IsCancellationRequested) { return false; }
         catch (Exception ex)
         {
-            log?.Write("UPDATE_CHECK_FAILED", ex.GetType().Name);
+            log?.Write("UPDATE_CHECK_FAILED", NetworkFailureDiagnostics.Format(ex, token));
             if (manual) window?.SetUpdateStatus("Unable to check for updates.\nSee logs for details.", null);
             return false;
         }

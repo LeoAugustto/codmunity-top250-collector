@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CODMunityTop250Collector.Diagnostics;
 
 namespace CODMunityTop250Collector.Updater;
 
@@ -245,7 +246,7 @@ public sealed class PrivateUpdateClient : IDisposable
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidDataException or JsonException or FormatException or CryptographicException)
         {
-            log("UPDATE_CHECK_FAILED", ex.GetType().Name);
+            log("UPDATE_CHECK_FAILED", NetworkFailureDiagnostics.Format(ex, cancellationToken));
             return new(UpdateCheckKind.Failed, Detail: ex.GetType().Name);
         }
     }

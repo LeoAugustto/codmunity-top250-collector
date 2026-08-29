@@ -17,11 +17,13 @@ $script:PrivateKeyPath = Join-Path $script:Top250Root 'Private\Updater\codmunity
 $script:PublicKeyPath = Join-Path $script:ProjectRoot 'CODMunityTop250Collector.App\Updater\codmunity-top250-release-public.pem'
 $script:ReleaseToolProject = Join-Path $script:ProjectRoot 'CODMunityTop250Collector.ReleaseTool\CODMunityTop250Collector.ReleaseTool.csproj'
 $script:PublishScript = Join-Path $PSScriptRoot 'publish-update.ps1'
+$script:GitHubMirrorScript = Join-Path $PSScriptRoot 'publish-github-release.ps1'
 $script:OciReleaseBase = 'https://gr5favu0uzxf.objectstorage.sa-saopaulo-1.oci.customer-oci.com/n/gr5favu0uzxf/b/codmunity-updates/o/top250%2Freleases%2F'
 $script:AlphaVersionPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha$'
 
 # Reuse the fixed OCI target, verify gate, and commit-last upload ordering.
 . $script:PublishScript -NoInvoke
+. $script:GitHubMirrorScript -NoInvoke
 
 function Assert-AlphaVersion {
     param([Parameter(Mandatory)][string]$Value, [Parameter(Mandatory)][string]$Name)
@@ -159,17 +161,28 @@ function Invoke-ReleaseUpdate {
         [scriptblock]$OciProfileValidator = { Assert-OciReleaseProfile },
         [scriptblock]$CreateManifestAction = { param($context, $dotnet, $key) Invoke-ReleaseToolCreateManifest -Context $context -DotnetPath $dotnet -PrivateKey $key },
         [scriptblock]$VerifyAction = { param($context) Invoke-ReleaseToolVerify -MsiPath $context.MsiPath -ManifestPath $context.ManifestPath -SignaturePath $context.SignaturePath },
-        [scriptblock]$PublishAction = { param($context, $dryRun) Invoke-ReleasePublication -MsiPath $context.MsiPath -ManifestPath $context.ManifestPath -SignaturePath $context.SignaturePath -WhatIfOnly:$dryRun }
+        [scriptblock]$PublishAction = { param($context, $dryRun) Invoke-ReleasePublication -MsiPath $context.MsiPath -ManifestPath $context.ManifestPath -SignaturePath $context.SignaturePath -WhatIfOnly:$dryRun },
+        [scriptblock]$GitHubPrepareAction = { param($context) Ensure-ReleaseSourceAndTag -TargetVersion $context.Version },
+        [scriptblock]$GitHubMirrorAction = { param($context) Publish-GitHubReleaseMirror -TargetVersion $context.Version -SkipPrepare }
     )
 
     $context = New-ReleaseUpdateContext -TargetVersion $TargetVersion -TargetReleaseNotes $TargetReleaseNotes -TargetMinimumUpdaterVersion $TargetMinimumUpdaterVersion
     $tools = Assert-ReleaseUpdatePrechecks -Context $context -PrivateKey $script:PrivateKeyPath -PublicKey $script:PublicKeyPath -ReleaseToolProjectPath $script:ReleaseToolProject -PublishScriptPath $script:PublishScript -DotnetLocator $DotnetLocator -OciCliLocator $OciCliLocator -OciProfileValidator $OciProfileValidator
 
+    & $GitHubPrepareAction $context
     New-Item -ItemType Directory -Path $context.ReleaseDirectory -Force | Out-Null
     & $CreateManifestAction $context $tools.DotnetPath $script:PrivateKeyPath
     & $VerifyAction $context
     & $PublishAction $context $true
     & $PublishAction $context $false
+
+    try {
+        & $GitHubMirrorAction $context
+    }
+    catch {
+        Write-Error 'OCI PUBLISHED / GITHUB MIRROR FAILED'
+        throw
+    }
 
     $msiHash = (Get-FileHash -LiteralPath $context.MsiPath -Algorithm SHA256).Hash
     Write-Host 'RELEASE PUBLISHED'
@@ -179,6 +192,7 @@ function Invoke-ReleaseUpdate {
     Write-Host "Manifest: $($context.ManifestPath)"
     Write-Host "Signature: $($context.SignaturePath)"
     Write-Host 'OCI: published'
+    Write-Host 'GitHub mirror: published'
     Write-Host 'Order: MSI -> manifest.sig -> manifest.json'
 }
 

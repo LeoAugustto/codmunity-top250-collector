@@ -65,7 +65,16 @@ public sealed class AppLogger
 }
 
 public sealed record DatasetStatus(string Status = "WAITING", int? Players = null, DateTimeOffset? CapturedAt = null, long? DurationMs = null, string? Reason = null, IReadOnlyList<RankedPlayer>? PlayerRows = null, ApiSyncState ApiSync = ApiSyncState.NotConfigured);
-public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null);
+public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null, string? BuildIdentity = null);
+
+public static class CollectorSupportInfo
+{
+    public static string Format(CollectorSnapshot snapshot, string collectorVersion, string runtimeVersion, string frameworkDescription, string osDescription, string processArchitecture) =>
+        string.Join(Environment.NewLine,
+            $"collectorVersion={collectorVersion}", $"runtimeVersion={runtimeVersion}", $"frameworkDescription={frameworkDescription}", $"osDescription={osDescription}", $"processArchitecture={processArchitecture}",
+            $"platform={snapshot.Platform}", $"gameBuildIdentity={snapshot.BuildIdentity ?? "unknown"}", $"layout={snapshot.Layout ?? "unknown"}",
+            $"lastCollectionResult={snapshot.CycleStatus}", $"lastApiSyncResult=resurgence:{snapshot.Resurgence?.ApiSync ?? ApiSyncState.NotConfigured},mp:{snapshot.Mp?.ApiSync ?? ApiSyncState.NotConfigured},br:{snapshot.Br?.ApiSync ?? ApiSyncState.NotConfigured}");
+}
 
 public sealed class EngineStatusParser
 {
@@ -86,7 +95,7 @@ public sealed class EngineStatusParser
             }
             return new DatasetStatus(GetString(value, "status") ?? "WAITING", GetInt(value, "rows"), ParseDate(value, "capturedAt"), GetLong(value, "durationMs"), GetString(value, "reason"), players);
         }
-        return new CollectorSnapshot(enabled, "Running", GetString(root, "platform") ?? "Unknown", string.Equals(GetString(root, "cycleStatus"), "UNSUPPORTED_BUILD", StringComparison.Ordinal) ? "Unsupported" : "Supported", GetString(root, "layout"), null, null, GetString(root, "cycleStatus") ?? "FAILED", null, Dataset("mp"), Dataset("br"), Dataset("resurgence"));
+        return new CollectorSnapshot(enabled, "Running", GetString(root, "platform") ?? "Unknown", string.Equals(GetString(root, "cycleStatus"), "UNSUPPORTED_BUILD", StringComparison.Ordinal) ? "Unsupported" : "Supported", GetString(root, "layout"), null, null, GetString(root, "cycleStatus") ?? "FAILED", null, Dataset("mp"), Dataset("br"), Dataset("resurgence"), GetString(root, "codSha256") ?? GetString(root, "runtimeBuildId"));
     }
     public string CopyBuildInfo(string json, string version)
     {
@@ -293,8 +302,44 @@ public sealed class CollectorScheduler
     private void Publish(CollectorSnapshot snapshot) { Snapshot = snapshot; Changed?.Invoke(snapshot); }
 }
 
-public static class StartupRegistration
+public enum StartupRegistrationResult { Unchanged, Registered, Removed, Repaired }
+
+public interface IStartupRegistration
 {
-    private const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run"; private const string Name = "CODMunityTop250Collector";
-    public static void Set(bool enabled, string exePath) { using var key = Registry.CurrentUser.OpenSubKey(KeyPath, true)!; if (enabled) key.SetValue(Name, $"\"{exePath}\""); else key.DeleteValue(Name, false); }
+    StartupRegistrationResult Reconcile(bool enabled, string executablePath);
+}
+
+public sealed class StartupSettingsApplier(IStartupRegistration registration)
+{
+    public StartupRegistrationResult? Apply(CollectorSettings previous, CollectorSettings current, string executablePath, bool reconcileOnStartup = false)
+    {
+        if (!reconcileOnStartup && previous.StartWithWindows == current.StartWithWindows) return null;
+        if (string.IsNullOrWhiteSpace(executablePath)) throw new InvalidOperationException("Current executable path is unavailable.");
+        return registration.Reconcile(current.StartWithWindows, executablePath);
+    }
+}
+
+public sealed class WindowsStartupRegistration : IStartupRegistration
+{
+    private const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string Name = "CODMunityTop250Collector";
+
+    public static string FormatCommand(string executablePath) => $"\"{executablePath}\"";
+
+    public StartupRegistrationResult Reconcile(bool enabled, string executablePath)
+    {
+        using var key = Registry.CurrentUser.CreateSubKey(KeyPath, writable: true) ?? throw new InvalidOperationException("Windows startup registry key is unavailable.");
+        var existing = key.GetValue(Name) as string;
+        if (!enabled)
+        {
+            if (existing is null) return StartupRegistrationResult.Unchanged;
+            key.DeleteValue(Name, false);
+            return StartupRegistrationResult.Removed;
+        }
+
+        var expected = FormatCommand(executablePath);
+        if (string.Equals(existing, expected, StringComparison.Ordinal)) return StartupRegistrationResult.Unchanged;
+        key.SetValue(Name, expected);
+        return existing is null ? StartupRegistrationResult.Registered : StartupRegistrationResult.Repaired;
+    }
 }

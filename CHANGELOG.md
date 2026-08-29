@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.21-alpha
+
+- Add sanitized API and updater network failure diagnostics for local troubleshooting.
+- Include runtime and collection/API status in Copy Build Info.
+- Fix Start with Windows registration and startup reconciliation from Settings and the tray.
+- Launch the Collector after a successful interactive MSI install or upgrade when selected.
+
 ## 0.1.20-alpha
 
 - Route the Battle.net Season 5 Reloaded layout through the dynamic exporter.
