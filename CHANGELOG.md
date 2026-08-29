@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.22-alpha
+
+- Accept SemVer build metadata during update checks while preserving version precedence.
+- Log invalid current updater versions before returning the update-check error.
+
 ## 0.1.21-alpha
 
 - Add sanitized API and updater network failure diagnostics for local troubleshooting.

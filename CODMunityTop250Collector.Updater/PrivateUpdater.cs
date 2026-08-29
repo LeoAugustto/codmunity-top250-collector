@@ -41,14 +41,16 @@ public sealed class UpdateOperationGate
     public void End() => Interlocked.Exchange(ref active, 0);
 }
 
-public readonly record struct AppSemanticVersion(int Major, int Minor, int Patch, string? Prerelease) : IComparable<AppSemanticVersion>
+public readonly record struct AppSemanticVersion(int Major, int Minor, int Patch, string? Prerelease, string? BuildMetadata = null) : IComparable<AppSemanticVersion>
 {
-    private static readonly Regex Pattern = new("^(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)(?:-(?<pre>[0-9A-Za-z.-]+))?$", RegexOptions.CultureInvariant);
+    private const string PrereleaseIdentifier = "(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+    private const string MetadataIdentifier = "[0-9A-Za-z-]+";
+    private static readonly Regex Pattern = new("^(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)(?:-(?<pre>" + PrereleaseIdentifier + "(?:\\." + PrereleaseIdentifier + ")*))?(?:\\+(?<metadata>" + MetadataIdentifier + "(?:\\." + MetadataIdentifier + ")*))?$", RegexOptions.CultureInvariant);
     public static bool TryParse(string? value, out AppSemanticVersion version)
     {
         var match = Pattern.Match(value ?? string.Empty);
         if (!match.Success) { version = default; return false; }
-        version = new(int.Parse(match.Groups["major"].Value, CultureInfo.InvariantCulture), int.Parse(match.Groups["minor"].Value, CultureInfo.InvariantCulture), int.Parse(match.Groups["patch"].Value, CultureInfo.InvariantCulture), match.Groups["pre"].Success ? match.Groups["pre"].Value : null);
+        version = new(int.Parse(match.Groups["major"].Value, CultureInfo.InvariantCulture), int.Parse(match.Groups["minor"].Value, CultureInfo.InvariantCulture), int.Parse(match.Groups["patch"].Value, CultureInfo.InvariantCulture), match.Groups["pre"].Success ? match.Groups["pre"].Value : null, match.Groups["metadata"].Success ? match.Groups["metadata"].Value : null);
         return true;
     }
     public int CompareTo(AppSemanticVersion other)

@@ -3,7 +3,7 @@
      xmlns:netfx="http://wixtoolset.org/schemas/v4/wxs/netfx">
   <Bundle Name="CODMunity Top 250 Collector"
           Manufacturer="CODMunity"
-        Version="0.1.21"
+        Version="0.1.22"
           UpgradeCode="{4D7781F4-570A-42A4-9378-F1D97C01B4C3}"
           IconSourceFile="$(var.ProjectDir)..\CODMunityTop250Collector.App\Assets\codmunity-logo.ico">
     <BootstrapperApplication>
@@ -43,8 +43,9 @@
                            ProductName="Microsoft .NET 8 Desktop Runtime (x64)" />
       </ExePackage>
       <MsiPackage Id="CODMunityTop250CollectorMsi"
-                  SourceFile="$(var.ProjectDir)..\dist\msi\CODMunityTop250Collector-0.1.21-alpha-win-x64.msi"
-                  Vital="yes" />
+                  SourceFile="$(var.ProjectDir)..\dist\msi\CODMunityTop250Collector-0.1.22-alpha-win-x64.msi"
+                  Vital="yes"
+                  Visible="no" />
     </Chain>
   </Bundle>
 </Wix>

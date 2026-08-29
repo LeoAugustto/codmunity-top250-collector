@@ -20,7 +20,7 @@ Secrets and credentials are deliberately excluded from this repository. Never co
 - `CODMunityTop250Collector.Core` — scheduling, collection orchestration, API sync, settings, and logs.
 - `CODMunityTop250Collector.Updater` / `CODMunityTop250Collector.UpdateHost` — signed update checks and local MSI handoff.
 - `engine` — versioned PowerShell orchestrator, build layouts, and exporters used by the app.
-- `Installer.Wix` / `Installer.Bundle` — per-user MSI and branded Burn setup.
+- `Installer.Wix` / `Installer.Bundle` — internal per-user MSI update package and the branded user-facing Burn setup.
 - `tools` — offline signing/release helpers and build helpers.
 
 ## Build
@@ -45,6 +45,16 @@ For an internal build with the embedded Closed Beta API credential, run:
 
 The helper accepts an already-provided `CODMUNITY_RANKED_SYNC_TOKEN_BUILD` environment credential, otherwise it prompts securely. It never prints or stores the token. Runtime environment credentials remain higher priority than the embedded Closed Beta credential.
 
+## Installation
+
+For manual installation or upgrade, use the versioned Setup executable:
+
+```text
+CODMunityTop250Collector-<version>-Setup.exe
+```
+
+The MSI is an internal package for the signed automatic-update flow (`manifest` → MSI → UpdateHost → silent Windows Installer). Do not use the MSI as the recommended manual installer.
+
 ## Release flow
 
 1. Build and validate locally.
@@ -52,7 +62,7 @@ The helper accepts an already-provided `CODMUNITY_RANKED_SYNC_TOKEN_BUILD` envir
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.21-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.22-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.

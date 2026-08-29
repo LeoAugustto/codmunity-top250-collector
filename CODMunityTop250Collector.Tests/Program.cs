@@ -25,8 +25,8 @@ try
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
-    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.21-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.21-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.22-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.22-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
     var ptBr = CultureInfo.GetCultureInfo("pt-BR");
@@ -57,13 +57,18 @@ static void InstallerLaunchContractTests()
 {
     var installerDirectory = Path.Combine(AppContext.BaseDirectory, "Installer");
     var msi = File.ReadAllText(Path.Combine(installerDirectory, "Package.wxs"));
-    if (!msi.Contains("CustomAction Id=\"LaunchCollector\" FileRef=\"CollectorExe\"", StringComparison.Ordinal) ||
-        !msi.Contains("WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND UILevel &gt;= 4", StringComparison.Ordinal) ||
-        msi.Contains("WIX_UPGRADE_DETECTED", StringComparison.Ordinal)) throw new Exception("MSI launch contract");
+    const string launchCondition = "WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND UILevel &gt;= 4 AND NOT (REMOVE = &quot;ALL&quot;) AND NOT REINSTALL AND (NOT Installed OR WIX_UPGRADE_DETECTED)";
+    if (!msi.Contains("CustomAction Id=\"LaunchCollector\" FileRef=\"CollectorExe\"", StringComparison.Ordinal) || !msi.Contains(launchCondition, StringComparison.Ordinal)) throw new Exception("MSI launch contract");
+    if (!MsiLaunchAllowed(true, false, false, 5, false, false)) throw new Exception("MSI clean install launch contract");
+    if (!MsiLaunchAllowed(true, true, true, 5, false, false)) throw new Exception("MSI major upgrade launch contract");
+    if (MsiLaunchAllowed(true, false, false, 2, false, false)) throw new Exception("MSI silent launch contract");
+    if (MsiLaunchAllowed(true, true, false, 5, false, true)) throw new Exception("MSI repair launch contract");
+    if (MsiLaunchAllowed(true, true, false, 5, true, false)) throw new Exception("MSI uninstall launch contract");
 
     var bundle = File.ReadAllText(Path.Combine(installerDirectory, "Bundle.wxs"));
     if (!bundle.Contains("LaunchTarget=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\\CODMunityTop250Collector.exe\"", StringComparison.Ordinal) ||
-        !bundle.Contains("LaunchWorkingFolder=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\"", StringComparison.Ordinal)) throw new Exception("Setup launch target contract");
+        !bundle.Contains("LaunchWorkingFolder=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\"", StringComparison.Ordinal) ||
+        !bundle.Contains("<MsiPackage Id=\"CODMunityTop250CollectorMsi\"", StringComparison.Ordinal) || !bundle.Contains("Visible=\"no\"", StringComparison.Ordinal)) throw new Exception("Setup bundle registration contract");
 }
 
 static void StartupRegistrationTests()
@@ -86,6 +91,9 @@ static void StartupRegistrationTests()
     registration.NextResult = StartupRegistrationResult.Repaired;
     if (applier.Apply(settingsOn, settingsOn, currentExecutable, reconcileOnStartup: true) != StartupRegistrationResult.Repaired || registration.Calls.Count != 3 || registration.Calls[2] != (true, currentExecutable)) throw new Exception("startup registration reconciliation");
 }
+
+static bool MsiLaunchAllowed(bool checkboxSelected, bool installed, bool majorUpgradeDetected, int uiLevel, bool removeAll, bool reinstall)
+    => checkboxSelected && uiLevel >= 4 && !removeAll && !reinstall && (!installed || majorUpgradeDetected);
 
 static async Task ApiSyncTests(AppLogger log)
 {
@@ -407,6 +415,8 @@ static void PrivateUpdaterTests(string root)
     ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Sha256 = "ABC" }), "invalid SHA accepted");
     ExpectFailure(() => UpdateManifestValidator.Validate(manifest with { Size = UpdateTrust.MaxMsiBytes + 1 }), "oversized MSI accepted");
     if (!AppSemanticVersion.TryParse("0.1.5-alpha", out var newer) || !AppSemanticVersion.TryParse("0.1.4-alpha", out var current) || newer.CompareTo(current) <= 0 || !AppSemanticVersion.TryParse("0.2.0-alpha", out var majorMinor) || !AppSemanticVersion.TryParse("0.1.99-alpha", out var oldMinor) || majorMinor.CompareTo(oldMinor) <= 0) throw new Exception("semantic version comparison");
+    if (!AppSemanticVersion.TryParse("0.1.21-alpha", out _) || !AppSemanticVersion.TryParse("0.1.21-alpha+commit", out var alphaWithMetadata) || !AppSemanticVersion.TryParse("1.2.3+build", out _) || !AppSemanticVersion.TryParse("1.2.3-beta.1+commit.abcdef", out _) || !AppSemanticVersion.TryParse("0.1.21-alpha", out var alphaWithoutMetadata) || alphaWithMetadata.CompareTo(alphaWithoutMetadata) != 0) throw new Exception("semantic version build metadata");
+    if (AppSemanticVersion.TryParse("1.2.3+", out _) || AppSemanticVersion.TryParse("1.2.3+build..metadata", out _) || AppSemanticVersion.TryParse("1.2.3+build_metadata", out _) || AppSemanticVersion.TryParse("1.2.3+build+metadata", out _)) throw new Exception("malformed semantic version metadata accepted");
     var handler = new FakeHandler(request =>
     {
         var address = request.RequestUri!.AbsoluteUri;
@@ -418,6 +428,19 @@ static void PrivateUpdaterTests(string root)
     using var client = new PrivateUpdateClient(publicDer, (_, _) => { }, handler, expectedFingerprint);
     var available = client.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult();
     if (available.Kind != UpdateCheckKind.Available || available.Update is null) throw new Exception("newer signed update not detected");
+    var metadataEvents = new List<string>();
+    if (!AppSemanticVersion.TryParse("0.1.21-alpha+1873921903f3a864142321ef568575b79b83edaa", out var installedWithMetadata)) throw new Exception("installed metadata version rejected");
+    var metadataManifest = manifest with { Version = "0.1.22-alpha", MinimumUpdaterVersion = "0.1.20-alpha" };
+    using (var metadataClient = new PrivateUpdateClient(publicDer, (evt, _) => metadataEvents.Add(evt), CreateUpdateHandler(signer, publicDer, metadataManifest, payload), expectedFingerprint))
+    {
+        var metadataAvailable = metadataClient.CheckAsync(installedWithMetadata, CancellationToken.None).GetAwaiter().GetResult();
+        if (metadataAvailable.Kind != UpdateCheckKind.Available || metadataAvailable.Update?.Manifest.Version != "0.1.22-alpha" || !metadataEvents.Contains("UPDATE_CHECK_START") || !metadataEvents.Contains("UPDATE_AVAILABLE")) throw new Exception("metadata current version update check");
+    }
+    if (!AppSemanticVersion.TryParse("0.1.22-alpha+somecommit", out var latestWithMetadata)) throw new Exception("latest metadata version rejected");
+    using (var sameMetadataClient = new PrivateUpdateClient(publicDer, (_, _) => { }, CreateUpdateHandler(signer, publicDer, metadataManifest, payload), expectedFingerprint))
+    {
+        if (sameMetadataClient.CheckAsync(latestWithMetadata, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None) throw new Exception("metadata changed version precedence");
+    }
     var sameHandler = CreateUpdateHandler(signer, publicDer, manifest with { Version = "0.1.4-alpha" }, payload);
     using (var sameClient = new PrivateUpdateClient(publicDer, (_, _) => { }, sameHandler, expectedFingerprint)) if (sameClient.CheckAsync(current, CancellationToken.None).GetAwaiter().GetResult().Kind != UpdateCheckKind.None) throw new Exception("same version offered");
     var olderHandler = CreateUpdateHandler(signer, publicDer, manifest with { Version = "0.1.3-alpha" }, payload);

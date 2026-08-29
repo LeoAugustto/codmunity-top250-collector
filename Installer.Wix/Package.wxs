@@ -3,7 +3,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="CODMunity Top 250 Collector"
            Manufacturer="CODMunity"
-           Version="0.1.21"
+           Version="0.1.22"
            UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
            Scope="perUser"
            InstallerVersion="500">
@@ -208,7 +208,7 @@
       <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" Order="1" Condition="1" />
       <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" Order="1" Condition="1" />
       <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" Order="1" Condition="1" />
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchCollector" Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND UILevel &gt;= 4" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchCollector" Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND UILevel &gt;= 4 AND NOT (REMOVE = &quot;ALL&quot;) AND NOT REINSTALL AND (NOT Installed OR WIX_UPGRADE_DETECTED)" />
     </UI>
 
     <InstallUISequence>

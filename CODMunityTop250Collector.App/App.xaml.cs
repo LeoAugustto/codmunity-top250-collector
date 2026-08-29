@@ -178,6 +178,7 @@ public partial class App : System.Windows.Application
         {
             if (!AppSemanticVersion.TryParse(AppVersion.Informational, out var current))
             {
+                log?.Write("UPDATE_CURRENT_VERSION_INVALID");
                 if (manual) window?.SetUpdateStatus("Unable to check for updates.\nSee logs for details.", null);
                 return false;
             }
