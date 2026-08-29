@@ -128,7 +128,7 @@ function Ensure-ReleaseSourceAndTag {
     $remoteCommit = Get-RemoteTagCommit -Tag $tag
     if ($null -ne $remoteCommit -and $remoteCommit -ne $head) { throw "Remote tag $tag points to a different commit and will not be replaced." }
     if ($null -eq $remoteCommit) {
-        $localCommit = (& git rev-list -n 1 $tag 2>$null).Trim()
+        $localOutput = @(& git rev-list -n 1 $tag 2>$null)`n        $localCommit = if ($localOutput.Count -gt 0) { [string]$localOutput[0] } else { $null }
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($localCommit) -and $localCommit -ne $head) { throw "Local tag $tag points to a different commit and will not be replaced." }
         if ([string]::IsNullOrWhiteSpace($localCommit)) { Invoke-Git -Arguments @('tag', '-a', $tag, '-m', "CODMunity Top 250 Collector $TargetVersion", $head) }
         Invoke-Git -Arguments @('push', 'origin', "refs/tags/$tag")
