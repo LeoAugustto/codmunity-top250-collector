@@ -18,7 +18,7 @@ $script:RemoteUrl = 'https://github.com/LeoAugustto/codmunity-top250-collector.g
 $script:PublicKeyRelativePath = 'CODMunityTop250Collector.App/Updater/codmunity-top250-release-public.pem'
 $script:AlphaVersionPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha$'
 
-function Assert-AlphaVersion {
+function Assert-GitHubAlphaVersion {
     param([Parameter(Mandatory)][string]$Value)
     if ($Value -notmatch $script:AlphaVersionPattern) {
         throw 'Version must be in X.Y.Z-alpha format.'
@@ -156,7 +156,7 @@ function Get-ReleaseNotes {
 function Get-ReleaseContext {
     param([Parameter(Mandatory)][string]$TargetVersion)
 
-    Assert-AlphaVersion -Value $TargetVersion
+    Assert-GitHubAlphaVersion -Value $TargetVersion
     $msiName = "CODMunityTop250Collector-$TargetVersion-win-x64.msi"
     $setupName = "CODMunityTop250Collector-$TargetVersion-Setup.exe"
     $releaseDirectory = Join-Path $script:ReleaseRoot $TargetVersion
