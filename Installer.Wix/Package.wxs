@@ -3,7 +3,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="CODMunity Top 250 Collector"
            Manufacturer="CODMunity"
-           Version="0.1.22"
+           Version="0.1.23"
            UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
            Scope="perUser"
            InstallerVersion="500">
@@ -69,6 +69,14 @@
               <RemoveFile Id="RemoveAssetsFiles" Name="*" On="uninstall" />
               <RemoveFolder Id="RemoveAssetsFolder" On="uninstall" />
             </Component>
+            <Directory Id="WatchdogAssetsFolder" Name="watchdog">
+              <Component Id="WatcherPlayTemplate" Guid="{9A29CB1B-7824-4B9E-BBD5-E0B69BCAAC9B}">
+                <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="WatcherPlayTemplate" Type="integer" Value="1" KeyPath="yes" />
+                <File Id="WatcherPlayTemplateFile" Source="$(var.ProjectDir)..\dist\portable\Assets\watchdog\bnet-play.png" />
+                <RemoveFile Id="RemoveWatcherPlayTemplate" Name="*" On="uninstall" />
+                <RemoveFolder Id="RemoveWatchdogAssetsFolder" On="uninstall" />
+              </Component>
+            </Directory>
           </Directory>
           <Directory Id="EngineFolder" Name="engine">
             <Component Id="EngineRootFiles" Guid="{6F9617F9-7D05-4C3A-A8D0-8CDE43E32C02}">
@@ -138,6 +146,7 @@
       <ComponentRef Id="ApplicationFiles" />
       <ComponentRef Id="DesktopShortcut" />
       <ComponentRef Id="AssetsFiles" />
+      <ComponentRef Id="WatcherPlayTemplate" />
       <ComponentRef Id="EngineRootFiles" />
       <ComponentRef Id="ExportersFolderCleanup" />
       <ComponentRef Id="BnetDynamicExporter" />

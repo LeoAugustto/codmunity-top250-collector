@@ -16,7 +16,7 @@ public static class CollectorPaths
 }
 
 // Unknown properties in legacy settings (including HistoryRetentionDays) are ignored by System.Text.Json.
-public sealed record CollectorSettings(bool CollectorEnabled = true, bool StartWithWindows = false)
+public sealed record CollectorSettings(bool CollectorEnabled = true, bool StartWithWindows = false, bool WatcherEnabled = false)
 {
     public CollectorSettings Normalized() => this;
 }
@@ -65,7 +65,7 @@ public sealed class AppLogger
 }
 
 public sealed record DatasetStatus(string Status = "WAITING", int? Players = null, DateTimeOffset? CapturedAt = null, long? DurationMs = null, string? Reason = null, IReadOnlyList<RankedPlayer>? PlayerRows = null, ApiSyncState ApiSync = ApiSyncState.NotConfigured);
-public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null, string? BuildIdentity = null);
+public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null, string? BuildIdentity = null, DateTimeOffset? CycleStartedAt = null);
 
 public static class CollectorSupportInfo
 {
@@ -269,7 +269,7 @@ public sealed class CollectorScheduler
     private async Task RunCycleAsync(int pid, CancellationToken token)
     {
         if (updatePreparationRequested) return;
-        if (!await cycleLock.WaitAsync(0, token)) return; var started = DateTimeOffset.UtcNow; Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", NextCollection = null }); log.Write("CYCLE_START");
+        if (!await cycleLock.WaitAsync(0, token)) return; var started = DateTimeOffset.UtcNow; Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", CycleStartedAt = started, NextCollection = null }); log.Write("CYCLE_START");
         try
         {
             var identity = await buildIdentity.GetOrCreateAsync(monitor.Describe(pid), token);
@@ -277,12 +277,12 @@ public sealed class CollectorScheduler
             if (string.IsNullOrWhiteSpace(result.StdOut)) throw new InvalidDataException("Engine did not return JSON.");
             var previous = Snapshot; var parsed = parser.Parse(result.StdOut, true, started);
             if (identity is not null && parsed.CycleStatus is ("OK" or "PARTIAL_READY")) buildIdentity.RememberValidatedLayout(identity, parsed.Layout);
-            var snapshot = parsed with { LastSuccess = parsed.CycleStatus is "OK" or "PARTIAL_READY" ? DateTimeOffset.UtcNow : previous.LastSuccess, Mp = PreserveLastValid(parsed.Mp, previous.Mp), Br = PreserveLastValid(parsed.Br, previous.Br), Resurgence = PreserveLastValid(parsed.Resurgence, previous.Resurgence) };
+            var snapshot = parsed with { LastSuccess = parsed.CycleStatus is "OK" or "PARTIAL_READY" ? DateTimeOffset.UtcNow : previous.LastSuccess, CycleStartedAt = null, Mp = PreserveLastValid(parsed.Mp, previous.Mp), Br = PreserveLastValid(parsed.Br, previous.Br), Resurgence = PreserveLastValid(parsed.Resurgence, previous.Resurgence) };
             // Operational priority: Resurgence first, Multiplayer second, Battle Royale retained for future compatibility.
             snapshot = snapshot with { Resurgence = await SyncDatasetAsync("resurgence", snapshot.Resurgence, token), Mp = await SyncDatasetAsync("mp", snapshot.Mp, token), Br = await SyncDatasetAsync("br", snapshot.Br, token) };
             Publish(snapshot); log.Write(snapshot.CycleStatus is "OK" ? "CYCLE_OK" : snapshot.CycleStatus is "UNSUPPORTED_BUILD" ? "UNSUPPORTED_BUILD" : "CYCLE_PARTIAL", $"exitCode={result.ExitCode}");
         }
-        catch (Exception ex) { Publish(Snapshot with { Game = "Running", CycleStatus = "FAILED", Error = "Engine error" }); log.Write("ENGINE_ERROR", ex.Message); }
+        catch (Exception ex) { Publish(Snapshot with { Game = "Running", CycleStatus = "FAILED", CycleStartedAt = null, Error = "Engine error" }); log.Write("ENGINE_ERROR", ex.Message); log.Write("CYCLE_FAILED", $"type={ex.GetType().Name} durationMs={(long)(DateTimeOffset.UtcNow - started).TotalMilliseconds}"); }
         finally { cycleLock.Release(); }
     }
     public void RequestUpdatePreparation() => updatePreparationRequested = true;

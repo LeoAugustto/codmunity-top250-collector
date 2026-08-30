@@ -19,14 +19,14 @@ var root = Path.Combine(Path.GetTempPath(), "CODMunityTop250CollectorTests", Gui
 try
 {
     var log = new AppLogger(); var parser = new EngineStatusParser(); var store = new SettingsStore(log);
-    store.Save(new CollectorSettings(false, true)); if (store.Load() != new CollectorSettings(false, true)) throw new Exception("settings load/save");
+    store.Save(new CollectorSettings(false, true, true)); if (store.Load() != new CollectorSettings(false, true, true)) throw new Exception("settings load/save");
     File.WriteAllText(CollectorPaths.Settings, "{\"CollectorEnabled\":true,\"StartWithWindows\":false,\"HistoryRetentionDays\":7}");
     if (store.Load() != new CollectorSettings(true, false)) throw new Exception("legacy settings compatibility");
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
-    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.22-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.22-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.23-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.23-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
     var ptBr = CultureInfo.GetCultureInfo("pt-BR");
@@ -36,6 +36,8 @@ try
     var ptBrCard = localHydratedTime.ToString("g", ptBr);
     if (!ptBrStatus.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrStatus.Contains(localHydratedTime.ToString("T", ptBr)) || !enUsStatus.Contains(localHydratedTime.ToString("d", enUs)) || !enUsStatus.Contains(localHydratedTime.ToString("T", enUs)) || !ptBrCard.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrCard.Contains(localHydratedTime.ToString("t", ptBr))) throw new Exception("localized timestamp formatting");
     StartupRegistrationTests();
+    StationWatcherTests().GetAwaiter().GetResult();
+    SafeModeNativeDialogContractTests();
     InstallerLaunchContractTests();
     ReleaseSigningTests(root);
     PrivateUpdaterTests(root);
@@ -47,18 +49,180 @@ try
     SchedulerBuildIdentityIntegrationTests(log).GetAwaiter().GetResult();
     SchedulerApiPriorityTests(log).GetAwaiter().GetResult();
     EngineManagedIdentityContractTests();
-    Console.WriteLine("PASS settings compatibility, startup registration reconciliation, installer launch contract, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
+    Console.WriteLine("PASS settings compatibility, station watcher state safety, startup registration reconciliation, installer launch contract, in-memory engine status parsing, API sync validation/retry safety, build identity cache safety, release signing/verification safety, private updater trust/download safety, automatic update coordination, UpdateHost safety, log rotation");
 }
 finally { CollectorPaths.RootOverride = null; Directory.Delete(root, true); }
 
 
 
+static void SafeModeNativeDialogContractTests()
+{
+    // Real COD observation: class #32770, direct cod.exe PID, owner=0, IDs 6/7/2.
+    // Labels deliberately are not an input to this contract.
+    if (!SafeModeDialogRules.IsCandidate(true, 14804, 14804, "#32770", true, true, true))
+        throw new Exception("ownerless COD Safe Mode dialog was rejected");
+    if (SafeModeDialogRules.IsCandidate(false, 14804, 14804, "#32770", true, true, true))
+        throw new Exception("Safe Mode dialog outside launch context was accepted");
+    if (SafeModeDialogRules.IsCandidate(true, 14804, 99, "#32770", true, true, true))
+        throw new Exception("non-COD dialog was accepted");
+    if (SafeModeDialogRules.IsCandidate(true, 14804, 14804, "#32770", true, true, false))
+        throw new Exception("incomplete dialog signature was accepted");
+
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var platformSource = File.ReadAllText(Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "WindowsStationWatcherPlatform.cs"));
+    var appSource = File.ReadAllText(Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "App.xaml.cs"));
+    var removedStaleOverrideVariable = "CODMUNITY_WATCHER_TEST_" + "STALE_SECONDS";
+    var removedStaleOverrideEvent = "WATCHER_TEST_STALE_" + "OVERRIDE";
+    if (appSource.Contains(removedStaleOverrideVariable, StringComparison.Ordinal) || appSource.Contains(removedStaleOverrideEvent, StringComparison.Ordinal)) throw new Exception("Temporary Watcher stale override remains.");
+    if (!platformSource.Contains("SafeModeDialogRules.IdNo", StringComparison.Ordinal) ||
+        !platformSource.Contains("handledSafeModeWindow", StringComparison.Ordinal) ||
+        !platformSource.Contains("WATCHER_BNET_PROCESS_ONLY", StringComparison.Ordinal) ||
+        !platformSource.Contains("WATCHER_BNET_RESTORE_REQUESTED", StringComparison.Ordinal) ||
+        !platformSource.Contains("nextRestoreUriUtc", StringComparison.Ordinal) ||
+        !appSource.Contains("ToolStripMenuItem(\"Watcher\")", StringComparison.Ordinal) ||
+        !appSource.Contains("WatcherEnabled = trayWatcher.Checked", StringComparison.Ordinal) ||
+        !appSource.Contains("trayWatcher.Checked = settings.WatcherEnabled", StringComparison.Ordinal) ||
+        platformSource.Contains("FindChildButton(dialog, \"No\")", StringComparison.Ordinal) ||
+        platformSource.Contains("GwOwner", StringComparison.Ordinal))
+        throw new Exception("Safe Mode native dialog implementation contract");
+}
+static async Task StationWatcherTests()
+{
+    var now = DateTimeOffset.Parse("2026-08-30T00:00:00Z");
+    var config = new StationWatcherConfiguration(TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(10), TimeSpan.FromSeconds(60), TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(6), TimeSpan.FromMinutes(9), TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30), 3);
+    CollectorSettings settings = new(CollectorEnabled: true, StartWithWindows: false, WatcherEnabled: false);
+    CollectorSnapshot snapshot = new(true);
+    var platform = new FakeStationWatcherPlatform();
+    var watcher = new StationWatcher(() => settings, () => snapshot, platform, (_, _) => { }, () => now, config);
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.Disabled || platform.LaunchCalls != 0 || platform.CloseCalls != 0) throw new Exception("disabled watcher acted");
+
+    settings = settings with { WatcherEnabled = true };
+    var startupSafePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(100, now), SafeModeResult = SafeModeDismissResult.Dismissed };
+    var startupSafeWatcher = new StationWatcher(() => settings with { WatcherEnabled = true }, () => snapshot, startupSafePlatform, (_, _) => { }, () => now, config);
+    await startupSafeWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (startupSafePlatform.SafeModeCalls != 1 || startupSafePlatform.LaunchCalls != 0) throw new Exception("pre-existing Safe Mode was not handled without Battle.net launch");
+    platform.LaunchResults.Enqueue(BattleNetLaunchProgress.PlayClicked);
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.WaitingForCod || platform.LaunchCalls != 1) throw new Exception("COD missing did not enter Battle.net Play flow");
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (platform.LaunchCalls != 1) throw new Exception("Play was repeated while waiting for COD");
+
+    now = now.AddMinutes(1);
+    var retryPlatform = new FakeStationWatcherPlatform();
+    var retryWatcher = new StationWatcher(() => settings, () => snapshot, retryPlatform, (_, _) => { }, () => now, config);
+    retryPlatform.LaunchResults.Enqueue(BattleNetLaunchProgress.PlayUnavailable);
+    await retryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    now = now.AddSeconds(59);
+    await retryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (retryPlatform.LaunchCalls != 1) throw new Exception("Play-unavailable retry spam");
+    now = now.AddSeconds(2);
+    retryPlatform.LaunchResults.Enqueue(BattleNetLaunchProgress.PlayClicked);
+    await retryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (retryPlatform.LaunchCalls != 2) throw new Exception("Play-unavailable retry missing");
+
+    now = now.AddMinutes(1);
+    platform.Cod = new StationCodProcess(301, now);
+    platform.SafeModeResult = SafeModeDismissResult.Dismissed;
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.WaitingForCod || platform.SafeModeCalls != 1 || platform.ForegroundCalls != 0) throw new Exception("Safe Mode did not remain inside the current launch attempt");
+    platform.Cod = null;
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.WaitingForCod || platform.LaunchCalls != 1) throw new Exception("Safe Mode launch attempted a second Battle.net Play click");
+    platform.Cod = new StationCodProcess(302, now);
+    platform.SafeModeResult = SafeModeDismissResult.NotPresent;
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.WaitingForData || platform.SafeModeCalls < 3 || platform.ForegroundCalls != 1) throw new Exception("COD launch transition / Safe Mode handling");
+    platform.SafeModeResult = SafeModeDismissResult.Dismissed;
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.WaitingForCod || platform.LaunchCalls != 1) throw new Exception("Safe Mode during WaitingForData restarted Battle.net Play");
+    platform.SafeModeResult = SafeModeDismissResult.NotPresent;
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+
+    snapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now);
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (watcher.Snapshot.State != StationWatcherState.Healthy) throw new Exception("new local collection did not make watcher healthy");
+    await watcher.EvaluateOnceAsync(CancellationToken.None);
+    if (platform.ForegroundCalls != 1) throw new Exception("watcher repeatedly forced foreground");
+    var gateCycleStarted = now.AddSeconds(-5);
+    var gateSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: "RUNNING", CycleStartedAt: gateCycleStarted);
+    var gatePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(350, now.AddMinutes(-30)), InternetAvailable = true, ClearCodOnClose = true };
+    var gateWatcher = new StationWatcher(() => settings, () => gateSnapshot, gatePlatform, (_, _) => { }, () => now, config);
+    await gateWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (gatePlatform.CloseCalls != 0 || gateWatcher.Snapshot.State != StationWatcherState.WaitingForData) throw new Exception("recent collection did not defer stale recovery");
+    gateSnapshot = gateSnapshot with { CycleStatus = "OK", CycleStartedAt = null, LastSuccess = now };
+    await gateWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (gatePlatform.CloseCalls != 0 || gateWatcher.Snapshot.State != StationWatcherState.Healthy) throw new Exception("successful deferred collection did not cancel recovery");
+
+    gateSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: "RUNNING", CycleStartedAt: gateCycleStarted);
+    gatePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(351, now.AddMinutes(-30)), InternetAvailable = true, ClearCodOnClose = true };
+    gateWatcher = new StationWatcher(() => settings, () => gateSnapshot, gatePlatform, (_, _) => { }, () => now.AddSeconds(61), config);
+    gatePlatform.LaunchResults.Enqueue(BattleNetLaunchProgress.PlayClicked);
+    await gateWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (gatePlatform.CloseCalls != 1 || gatePlatform.LaunchCalls != 1) throw new Exception("stuck collection beyond grace did not recover");
+
+    now = now.AddMinutes(1);
+    var apiFailurePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(401, now.AddMinutes(-30)), InternetAvailable = true };
+    var apiFailureSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now, Mp: new DatasetStatus("OK", 250, ApiSync: ApiSyncState.Failed));
+    var apiFailureWatcher = new StationWatcher(() => settings, () => apiFailureSnapshot, apiFailurePlatform, (_, _) => { }, () => now, config);
+    await apiFailureWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (apiFailureWatcher.Snapshot.State != StationWatcherState.Healthy || apiFailurePlatform.CloseCalls != 0) throw new Exception("API failure triggered COD recovery");
+
+    now = now.AddMinutes(1);
+    var offlinePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(501, now.AddMinutes(-30)), InternetAvailable = false };
+    var staleSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11));
+    var offlineWatcher = new StationWatcher(() => settings, () => staleSnapshot, offlinePlatform, (_, _) => { }, () => now, config);
+    await offlineWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (offlineWatcher.Snapshot.State != StationWatcherState.Offline || offlinePlatform.CloseCalls != 0) throw new Exception("offline stale collection restarted COD");
+
+    now = now.AddMinutes(1);
+    var recoveryPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(601, now.AddMinutes(-30)), InternetAvailable = true, ClearCodOnClose = true, UiResponsive = false, SafeModeResult = SafeModeDismissResult.Dismissed };
+    recoveryPlatform.LaunchResults.Enqueue(BattleNetLaunchProgress.PlayClicked);
+    var recoverySnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11));
+    var recoveryWatcher = new StationWatcher(() => settings, () => recoverySnapshot, recoveryPlatform, (_, _) => { }, () => now, config);
+    await recoveryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (recoveryPlatform.CloseCalls != 1 || recoveryPlatform.LaunchCalls != 1 || recoveryWatcher.Snapshot.State != StationWatcherState.WaitingForCod) throw new Exception("stale hung process did not exit before Battle.net launch");
+    recoveryPlatform.Cod = new StationCodProcess(602, now);
+    await recoveryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    recoveryPlatform.SafeModeResult = SafeModeDismissResult.NotPresent;
+    await recoveryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    recoverySnapshot = recoverySnapshot with { LastSuccess = now };
+    await recoveryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (recoveryWatcher.Snapshot.State != StationWatcherState.RecoveryCooldown) throw new Exception("recovery did not require new local collection/cooldown");
+    now = now.AddMinutes(1);
+    recoverySnapshot = recoverySnapshot with { LastSuccess = now.AddMinutes(-11) };
+    await recoveryWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (recoveryPlatform.CloseCalls != 1) throw new Exception("cooldown did not block immediate second recovery");
+
+    now = now.AddMinutes(1);
+    var failureConfig = config with { StaleAfter = TimeSpan.FromSeconds(1), LaunchRetryAfter = TimeSpan.FromSeconds(2) };
+    var crashPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(701, now.AddMinutes(-30)), InternetAvailable = true, CloseResult = false };
+    var crashSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11));
+    var crashWatcher = new StationWatcher(() => settings, () => crashSnapshot, crashPlatform, (_, _) => { }, () => now, failureConfig);
+    for (var attempt = 0; attempt < 3; attempt++)
+    {
+        await crashWatcher.EvaluateOnceAsync(CancellationToken.None);
+        now = now.AddSeconds(3);
+    }
+    if (crashPlatform.CloseCalls != 3 || crashPlatform.LaunchCalls != 0 || crashWatcher.Snapshot.State != StationWatcherState.CrashLoopBackoff) throw new Exception("kill failure proceeded to Battle.net or skipped crash-loop backoff");
+}
 static void InstallerLaunchContractTests()
 {
     var installerDirectory = Path.Combine(AppContext.BaseDirectory, "Installer");
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var watcherSourceAsset = Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "Assets", "watchdog", "bnet-play.png");
+    var validationHelper = Path.Combine(repositoryRoot, "tools", "validate-local-install.ps1");
+    var validationScript = File.ReadAllText(validationHelper);
+    if (!validationScript.Contains("-ReplaceAndValidate", StringComparison.Ordinal) || !validationScript.Contains("-uninstall", StringComparison.Ordinal) || !validationScript.Contains("Test-InstalledPayload", StringComparison.Ordinal) || !validationScript.Contains("Get-FileHash", StringComparison.Ordinal) || !validationScript.Contains("[IO.Path]::GetFullPath", StringComparison.Ordinal)) throw new Exception("same-version validation helper contract");
+
+    var appProject = Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "CODMunityTop250Collector.App.csproj");
+    if (!File.Exists(watcherSourceAsset) || !File.ReadAllText(appProject).Contains("<Content Include=\"Assets\\watchdog\\**\\*\">", StringComparison.Ordinal)) throw new Exception("Watcher template publish contract");
     var msi = File.ReadAllText(Path.Combine(installerDirectory, "Package.wxs"));
     const string launchCondition = "WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND UILevel &gt;= 4 AND NOT (REMOVE = &quot;ALL&quot;) AND NOT REINSTALL AND (NOT Installed OR WIX_UPGRADE_DETECTED)";
     if (!msi.Contains("CustomAction Id=\"LaunchCollector\" FileRef=\"CollectorExe\"", StringComparison.Ordinal) || !msi.Contains(launchCondition, StringComparison.Ordinal)) throw new Exception("MSI launch contract");
+    if (!msi.Contains("Source=\"$(var.ProjectDir)..\\dist\\portable\\Assets\\watchdog\\bnet-play.png\"", StringComparison.Ordinal) || !msi.Contains("<Directory Id=\"WatchdogAssetsFolder\" Name=\"watchdog\">", StringComparison.Ordinal)) throw new Exception("MSI watcher template payload contract");
     if (!MsiLaunchAllowed(true, false, false, 5, false, false)) throw new Exception("MSI clean install launch contract");
     if (!MsiLaunchAllowed(true, true, true, 5, false, false)) throw new Exception("MSI major upgrade launch contract");
     if (MsiLaunchAllowed(true, false, false, 2, false, false)) throw new Exception("MSI silent launch contract");
@@ -622,6 +786,38 @@ sealed class FakeStartupRegistration : IStartupRegistration
     }
 }
 
+sealed class FakeStationWatcherPlatform : IStationWatcherPlatform
+{
+    public StationCodProcess? Cod { get; set; }
+    public bool InternetAvailable { get; set; } = true;
+    public bool ClearCodOnClose { get; set; }
+    // Presence is intentionally independent from this test-only UI responsiveness signal.
+    public bool UiResponsive { get; set; } = true;
+    public bool CloseResult { get; set; } = true;
+    public SafeModeDismissResult SafeModeResult { get; set; } = SafeModeDismissResult.NotPresent;
+    public Queue<BattleNetLaunchProgress> LaunchResults { get; } = new();
+    public int LaunchCalls { get; private set; }
+    public int CloseCalls { get; private set; }
+    public int SafeModeCalls { get; private set; }
+    public int ForegroundCalls { get; private set; }
+    public int ResetCalls { get; private set; }
+    public StationCodProcess? FindCodProcess() => Cod;
+    public void ResetLaunchAttempt() => ResetCalls++;
+    public Task<BattleNetLaunchProgress> AdvanceCodLaunchAsync(CancellationToken token)
+    {
+        LaunchCalls++;
+        return Task.FromResult(LaunchResults.Count > 0 ? LaunchResults.Dequeue() : BattleNetLaunchProgress.WaitingForBattleNet);
+    }
+    public Task<bool> IsInternetAvailableAsync(CancellationToken token) => Task.FromResult(InternetAvailable);
+    public Task<bool> CloseCodForRecoveryAsync(int pid, CancellationToken token)
+    {
+        CloseCalls++;
+        if (ClearCodOnClose && CloseResult) Cod = null;
+        return Task.FromResult(CloseResult);
+    }
+    public Task<SafeModeDismissResult> DismissSafeModeNoAsync(CancellationToken token) { SafeModeCalls++; return Task.FromResult(SafeModeResult); }
+    public Task<bool> BringCodToForegroundAsync(int pid, CancellationToken token) { ForegroundCalls++; return Task.FromResult(true); }
+}
 sealed class StaticTokenProvider(string? token) : IApiTokenProvider { public string? GetToken() => token; }
 sealed class RecordingHandler(IEnumerable<HttpStatusCode> statuses) : HttpMessageHandler
 {

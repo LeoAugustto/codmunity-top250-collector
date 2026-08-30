@@ -12,7 +12,7 @@ using Forms = System.Windows.Forms;
 namespace CODMunityTop250Collector.App;
 public partial class App : System.Windows.Application
 {
-    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private Forms.ToolStripMenuItem? trayCollectorEnabled; private Forms.ToolStripMenuItem? trayStartup; private bool updatingTraySettings; private CollectorScheduler? scheduler; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private StartupSettingsApplier? startupSettings; private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
+    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private Forms.ToolStripMenuItem? trayCollectorEnabled; private Forms.ToolStripMenuItem? trayWatcher; private Forms.ToolStripMenuItem? trayStartup; private bool updatingTraySettings; private CollectorScheduler? scheduler; private StationWatcher? watcher; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private StartupSettingsApplier? startupSettings; private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -25,11 +25,11 @@ public partial class App : System.Windows.Application
             log = new AppLogger(); log.Write("APP_START", $"runtimeVersion={Environment.Version} frameworkDescription=\"{RuntimeInformation.FrameworkDescription}\" osDescription=\"{RuntimeInformation.OSDescription}\" processArchitecture={RuntimeInformation.ProcessArchitecture}"); settingsStore = new SettingsStore(log); settings = settingsStore.Load(); startupSettings = new StartupSettingsApplier(new WindowsStartupRegistration()); ReconcileStartupRegistration(onStartup: true);
             var rankedApi = new RankedPlayersApiClient(new CompositeApiTokenProvider(new EnvironmentApiTokenProvider(), new EmbeddedRankedSyncTokenProvider()), log);
             scheduler = new CollectorScheduler(new CodProcessMonitor(), new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine")); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
-            window = new MainWindow(this); window.SetVersion(AppVersion.Display); window.SetSettings(settings); CreateTray(); cts = new CancellationTokenSource();
+            window = new MainWindow(this); window.SetVersion(AppVersion.Display); window.SetSettings(settings); CreateTray(); cts = new CancellationTokenSource(); watcher = new StationWatcher(() => settings, () => scheduler?.Snapshot ?? new CollectorSnapshot(settings.CollectorEnabled), new WindowsStationWatcherPlatform((evt, detail) => log?.Write(evt, detail)), (evt, detail) => log?.Write(evt, detail));
             var publicKey = EmbeddedUpdateKey.LoadSubjectPublicKeyInfo();
             try { updater = new PrivateUpdateClient(publicKey, (evt, detail) => log?.Write(evt, detail)); }
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(publicKey); }
-            _ = scheduler.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token);
+            _ = scheduler.RunAsync(cts.Token); _ = watcher.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token);
             _ = Task.Run(async () => { while (!cts.IsCancellationRequested) { showEvent.WaitOne(); await Dispatcher.InvokeAsync(ShowWindow); } });
         }
         catch (Exception ex)
@@ -44,6 +44,7 @@ public partial class App : System.Windows.Application
         tray = new Forms.NotifyIcon { Icon = LoadTrayIcon(), Visible = true, Text = "CODMunity Collector | Waiting for Call of Duty" };
         var menu = new Forms.ContextMenuStrip(); menu.Items.Add("CODMunity Top 250 Collector", null, (_, _) => ShowWindow()); menu.Items.Add(new Forms.ToolStripSeparator());
         trayCollectorEnabled = new Forms.ToolStripMenuItem("Collector Enabled") { Checked = settings.CollectorEnabled, CheckOnClick = true }; trayCollectorEnabled.CheckedChanged += (_, _) => { if (!updatingTraySettings) Save(settings with { CollectorEnabled = trayCollectorEnabled.Checked }); }; menu.Items.Add(trayCollectorEnabled);
+        trayWatcher = new Forms.ToolStripMenuItem("Watcher") { Checked = settings.WatcherEnabled, CheckOnClick = true }; trayWatcher.CheckedChanged += (_, _) => { if (!updatingTraySettings) Save(settings with { WatcherEnabled = trayWatcher.Checked }); }; menu.Items.Add(trayWatcher);
         var sync = new Forms.ToolStripMenuItem("Sync Now"); sync.Click += async (_, _) => { if (scheduler is not null) await scheduler.SyncNowAsync(CancellationToken.None); }; menu.Items.Add(sync);
         menu.Items.Add("Open Status", null, (_, _) => ShowWindow());
         var checkUpdates = new Forms.ToolStripMenuItem("Check for updates"); checkUpdates.Click += async (_, _) => await CheckForUpdatesFromTrayAsync(); menu.Items.Add(checkUpdates);
@@ -102,6 +103,7 @@ public partial class App : System.Windows.Application
         try
         {
             if (trayCollectorEnabled is not null) trayCollectorEnabled.Checked = settings.CollectorEnabled;
+            if (trayWatcher is not null) trayWatcher.Checked = settings.WatcherEnabled;
             if (trayStartup is not null) trayStartup.Checked = settings.StartWithWindows;
         }
         finally { updatingTraySettings = false; }

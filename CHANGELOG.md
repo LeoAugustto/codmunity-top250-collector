@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.23-alpha
+
+- Add an opt-in simplified station watcher that uses local collection health only and restarts Battle.net Call of Duty through the validated Play flow.
+- Add Safe Mode dialog handling, bounded recovery cooldown, and crash-loop backoff for dedicated stations.
+
 ## 0.1.22-alpha
 
 - Accept SemVer build metadata during update checks while preserving version precedence.

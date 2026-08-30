@@ -32,6 +32,7 @@ public partial class MainWindow : Window
         updating = true;
         Enabled.IsChecked = settings.CollectorEnabled;
         Startup.IsChecked = settings.StartWithWindows;
+        Watcher.IsChecked = settings.WatcherEnabled;
         updating = false;
     }
     public void SetVersion(string version) { VersionText.Text = "v" + version; SettingsVersionText.Text = version; SettingsUpdateVersionText.Text = "v" + version; }
@@ -169,9 +170,10 @@ public partial class MainWindow : Window
         if (remaining <= TimeSpan.Zero) { NextSyncText.Text = "Starting..."; return; }
         NextSyncText.Text = $"Next sync in {(int)remaining.TotalMinutes:D2}:{remaining.Seconds:D2}";
     }
-    private CollectorSettings Current => new(Enabled.IsChecked == true, Startup.IsChecked == true);
+    private CollectorSettings Current => new(CollectorEnabled: Enabled.IsChecked == true, StartWithWindows: Startup.IsChecked == true, WatcherEnabled: Watcher.IsChecked == true);
     private void EnabledChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
     private void StartupChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
+    private void WatcherChanged(object sender, RoutedEventArgs e) { if (!updating) app.Save(Current); }
     private async void SyncNow(object sender, RoutedEventArgs e) => await app.SyncNowAsync();
     private void CopyBuild(object sender, RoutedEventArgs e) => app.CopyBuildInfo();
     public void ShowSettings() => SettingsBackdrop.Visibility = Visibility.Visible;
