@@ -3,7 +3,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="CODMunity Top 250 Collector"
            Manufacturer="CODMunity"
-           Version="0.1.23"
+           Version="0.1.24"
            UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
            Scope="perUser"
            InstallerVersion="500">
@@ -83,6 +83,7 @@
               <RegistryValue Root="HKCU" Key="Software\CODMunity\Top250Collector\Installer" Name="EngineRootFiles" Type="integer" Value="1" KeyPath="yes" />
               <File Id="BuildLayouts" Source="$(var.ProjectDir)..\dist\portable\engine\build_layouts.json" />
               <File Id="Orchestrator" Source="$(var.ProjectDir)..\dist\portable\engine\top250_orchestrator.ps1" />
+              <File Id="LayoutDiscoveryModule" Source="$(var.ProjectDir)..\dist\portable\engine\layout_discovery.psm1" />
               <RemoveFile Id="RemoveEngineRootFiles" Name="*" On="uninstall" />
               <RemoveFolder Id="RemoveEngineFolder" On="uninstall" />
             </Component>

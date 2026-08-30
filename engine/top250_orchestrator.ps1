@@ -8,7 +8,10 @@ param(
     [string]$VerifiedCodPath = "",
     [string]$VerifiedPlatform = "",
     [string]$VerifiedBuildSha256 = "",
-    [string]$VerifiedLayout = ""
+    [string]$VerifiedLayout = "",
+    [switch]$StaticDiscoveryOnly,
+    [string]$StaticCodPath = "",
+    [string]$StaticDiscoverySha256 = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +30,7 @@ $LogsRoot = Join-Path $CollectorRoot "logs"
 $LogPath = Join-Path $LogsRoot "orchestrator.log"
 $StatusPath = Join-Path $CollectorRoot "orchestrator_status.json"
 $ManifestPath = Join-Path $PSScriptRoot "build_layouts.json"
-$DiscoveredLayoutsPath = Join-Path $CollectorRoot "discovered_layouts.json"
+Import-Module (Join-Path $PSScriptRoot "layout_discovery.psm1") -Force
 
 if (-not ("Top250OrchestratorNative" -as [type])) {
     Add-Type @"
@@ -168,43 +171,59 @@ function Convert-RawOffsetToRva {
     if (($Header.Length -lt 0x100) -or ([BitConverter]::ToUInt16($Header, 0) -ne 0x5A4D)) { throw "INVALID_PE_DOS_SIGNATURE" }
     $pe = [int][BitConverter]::ToUInt32($Header, 0x3C)
     if (($pe -lt 0x40) -or (($pe + 24) -gt $Header.Length) -or ([BitConverter]::ToUInt32($Header, $pe) -ne 0x00004550)) { throw "INVALID_PE_SIGNATURE" }
-    $sectionCount = [int][BitConverter]::ToUInt16($Header, $pe + 6)
-    $optionalSize = [int][BitConverter]::ToUInt16($Header, $pe + 20)
-    $sectionOffset = $pe + 24 + $optionalSize
+    $sectionCount = [int][BitConverter]::ToUInt16($Header, $pe + 6); $optionalSize = [int][BitConverter]::ToUInt16($Header, $pe + 20); $sectionOffset = $pe + 24 + $optionalSize
     for ($i = 0; $i -lt $sectionCount; $i++) {
-        $offset = $sectionOffset + ($i * 40)
-        if (($offset + 40) -gt $Header.Length) { throw "INVALID_PE_SECTION_TABLE" }
-        $virtualAddress = [Int64][BitConverter]::ToUInt32($Header, $offset + 12)
-        $rawSize = [Int64][BitConverter]::ToUInt32($Header, $offset + 16)
-        $rawStart = [Int64][BitConverter]::ToUInt32($Header, $offset + 20)
+        $offset = $sectionOffset + ($i * 40); if (($offset + 40) -gt $Header.Length) { throw "INVALID_PE_SECTION_TABLE" }
+        $virtualAddress = [Int64][BitConverter]::ToUInt32($Header, $offset + 12); $rawSize = [Int64][BitConverter]::ToUInt32($Header, $offset + 16); $rawStart = [Int64][BitConverter]::ToUInt32($Header, $offset + 20)
         if (($RawOffset -ge $rawStart) -and ($RawOffset -lt ($rawStart + $rawSize))) { return $virtualAddress + $RawOffset - $rawStart }
     }
     throw "SIGNATURE_OUTSIDE_PE_SECTION"
 }
 
-function Get-BnetLayoutFromSignature {
-    param([string]$CodPath)
-    [byte[]]$pattern = @(0x0F,0xB6,0xC2,0x4C,0x8D,0x05,0,0,0,0,0x48,0x69,0xC8,0xF0,0x20,0x08,0,0x33,0xD2,0x49,0x8D,0x80,0x18,0xB8,0x03,0,0x48,0x03,0xC1,0x42,0x80,0xBC,0x01,0xC8,0,0,0,0x03,0x48,0x0F,0x45,0xC2,0xC3)
-    [bool[]]$fixedBytes = @($true,$true,$true,$true,$true,$true,$false,$false,$false,$false,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true,$true)
-    $matches = [BnetLayoutStaticScanner]::Find($CodPath, $pattern, $fixedBytes)
-    if ($matches.Count -ne 1) { throw "SIGNATURE_MATCH_COUNT_$($matches.Count)" }
-    $stream = [IO.File]::Open($CodPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    try {
-        $header = New-Object byte[] 0x1000; [void]$stream.Read($header, 0, $header.Length)
-        $matchRaw = [Int64]$matches[0]; $matchRva = Convert-RawOffsetToRva -Header $header -RawOffset $matchRaw
-        $stream.Position = $matchRaw + 6; $dispBytes = New-Object byte[] 4; [void]$stream.Read($dispBytes, 0, 4)
-        $slotBase = $matchRva + 10 + [BitConverter]::ToInt32($dispBytes, 0)
-        if ($slotBase -le 0) { throw "INVALID_SLOT_BASE" }
-        $modes = [ordered]@{}
-        foreach ($item in @(@("mp",0),@("br",1),@("resurgence",2))) {
-            $slot = $slotBase + ([Int64]$item[1] * 0x820F0)
-            $modes[$item[0]] = [pscustomobject]@{ stateRva = ("0x{0:X}" -f ($slot + 0xC8)); countRva = ("0x{0:X}" -f ($slot + 0x3B814)); entry0Rva = ("0x{0:X}" -f ($slot + 0x3B818)) }
-        }
-        return [pscustomobject]@{ name = "bnet-signature-discovered"; priority = 0; source = "signature-discovery"; signatureRva = ("0x{0:X}" -f $matchRva); datasets = [pscustomobject]$modes }
+function Convert-DiscoveryPattern {
+    param([string]$Pattern)
+    $tokens = @($Pattern.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)); if ($tokens.Count -lt 4) { throw 'SIGNATURE_PATTERN_TOO_SHORT' }
+    $bytes = New-Object byte[] $tokens.Count; $fixed = New-Object bool[] $tokens.Count
+    for ($i = 0; $i -lt $tokens.Count; $i++) {
+        if ($tokens[$i] -eq '??') { $fixed[$i] = $false }
+        elseif ($tokens[$i] -match '^[0-9A-Fa-f]{2}$') { $bytes[$i] = [Convert]::ToByte($tokens[$i], 16); $fixed[$i] = $true }
+        else { throw 'SIGNATURE_PATTERN_INVALID' }
     }
-    finally { $stream.Dispose() }
+    return [pscustomobject]@{ Bytes = $bytes; Fixed = $fixed }
 }
 
+function Get-BnetStaticDiscoveryCandidates {
+    param([string]$CodPath, [string]$Sha256, [object]$Catalog)
+    $methods = if (($null -eq $Catalog) -or ($null -eq $Catalog.methods)) { @() } else { @($Catalog.methods) }
+    if ($methods.Count -eq 0) { return [pscustomobject]@{ Candidates = @(); Reason = 'NO_TRUSTED_SIGNATURE_METHODS' } }
+    $headerStream = [IO.File]::Open($CodPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { $header = New-Object byte[] 0x1000; [void]$headerStream.Read($header, 0, $header.Length) } finally { $headerStream.Dispose() }
+    $candidates = @()
+    foreach ($method in $methods) {
+        try {
+            $anchors = @($method.anchors); if ([string]::IsNullOrWhiteSpace([string]$method.methodVersion) -or $anchors.Count -ne 9) { continue }
+            $found = @{}; $valid = $true
+            foreach ($anchor in $anchors) {
+                $key = ([string]$anchor.mode + '/' + [string]$anchor.field)
+                if ($key -notmatch '^(mp|br|resurgence)/(stateRva|countRva|entry0Rva)$' -or $found.ContainsKey($key)) { $valid = $false; break }
+                $pattern = Convert-DiscoveryPattern -Pattern ([string]$anchor.pattern); $matches = [BnetLayoutStaticScanner]::Find($CodPath, $pattern.Bytes, $pattern.Fixed)
+                if ($matches.Count -ne 1) { $valid = $false; break }
+                $matchRaw = [Int64]$matches[0]; $matchRva = Convert-RawOffsetToRva -Header $header -RawOffset $matchRaw
+                $stream = [IO.File]::Open($CodPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try { $stream.Position = $matchRaw + [int]$anchor.displacementOffset; $disp = New-Object byte[] 4; [void]$stream.Read($disp, 0, 4); $target = $matchRva + [int]$anchor.instructionEndOffset + [BitConverter]::ToInt32($disp, 0) }
+                finally { $stream.Dispose() }
+                if ($target -le 0) { $valid = $false; break }
+                $found[$key] = $target; Write-Log ('LAYOUT_SIGNATURE_FOUND id={0}' -f [string]$anchor.id)
+            }
+            if ($valid -and $found.Count -eq 9) {
+                $definition = New-BnetLayoutDefinitionFromAnchors -Anchors $found -Sha256 $Sha256 -MethodVersion ([string]$method.methodVersion)
+                $shape = Test-BnetLayoutDefinition -Definition $definition
+                if ($shape.Valid) { $candidates += [pscustomobject]@{ Valid = $true; Definition = $definition; MethodVersion = [string]$method.methodVersion } }
+            }
+        }
+        catch { }
+    }
+    return [pscustomobject]@{ Candidates = $candidates; Reason = if ($candidates.Count -eq 0) { 'NO_DETERMINISTIC_CANDIDATE' } else { $null } }
+}
 function Get-XboxRuntimeBuildId {
     param([Diagnostics.Process]$Cod)
     try { $moduleBase = [Int64]$Cod.MainModule.BaseAddress.ToInt64() }
@@ -310,32 +329,36 @@ function Get-LastWriteUtc {
 
 function Test-ExporterPayload {
     param([object]$json, [string]$ExpectedMode, [DateTime]$StartedAt, [object]$Identity)
-    if ($json.mode -ne $ExpectedMode) { return [ordered]@{ Status = "FAILED"; Reason = "MODE_MISMATCH" } }
-    if ($Identity.Type -eq "sha256") {
-        if ([string]::IsNullOrWhiteSpace([string]$json.buildSha256)) { return [ordered]@{ Status = "FAILED"; Reason = "BUILD_HASH_MISSING" } }
-        if ([string]$json.buildSha256 -ne [string]$Identity.Value) { return [ordered]@{ Status = "FAILED"; Reason = "BUILD_HASH_MISMATCH" } }
+    if ($json.mode -ne $ExpectedMode) { return [ordered]@{ Status = 'FAILED'; Reason = 'MODE_MISMATCH' } }
+    if ($Identity.Type -eq 'sha256') {
+        if ([string]::IsNullOrWhiteSpace([string]$json.buildSha256)) { return [ordered]@{ Status = 'FAILED'; Reason = 'BUILD_HASH_MISSING' } }
+        if ([string]$json.buildSha256 -ne [string]$Identity.Value) { return [ordered]@{ Status = 'FAILED'; Reason = 'BUILD_HASH_MISMATCH' } }
     }
-    elseif ($Identity.Type -eq "runtimeBuildId") {
-        if ([string]::IsNullOrWhiteSpace([string]$json.runtimeBuildId)) { return [ordered]@{ Status = "FAILED"; Reason = "RUNTIME_BUILD_ID_MISSING" } }
-        if ([string]$json.runtimeBuildId -ne [string]$Identity.Value) { return [ordered]@{ Status = "FAILED"; Reason = "RUNTIME_BUILD_ID_MISMATCH" } }
+    elseif ($Identity.Type -eq 'runtimeBuildId') {
+        if ([string]::IsNullOrWhiteSpace([string]$json.runtimeBuildId)) { return [ordered]@{ Status = 'FAILED'; Reason = 'RUNTIME_BUILD_ID_MISSING' } }
+        if ([string]$json.runtimeBuildId -ne [string]$Identity.Value) { return [ordered]@{ Status = 'FAILED'; Reason = 'RUNTIME_BUILD_ID_MISMATCH' } }
     }
-    try { $capturedAt = [DateTime]::Parse([string]$json.capturedAt).ToUniversalTime() }
-    catch { return [ordered]@{ Status = "FAILED"; Reason = "CAPTURED_AT_INVALID" } }
-    if ($capturedAt -lt $StartedAt.AddSeconds(-1)) { return [ordered]@{ Status = "FAILED"; Reason = "CAPTURED_AT_STALE" } }
-    if (($json.nativeCount -lt 1) -or ($json.nativeCount -gt 260)) { return [ordered]@{ Status = "FAILED"; Reason = "NATIVE_COUNT_INVALID" } }
-    if (($json.rowCount -lt 1) -or ($json.rowCount -gt 260)) { return [ordered]@{ Status = "FAILED"; Reason = "ROW_COUNT_INVALID" } }
-    if ($null -eq $json.players) { return [ordered]@{ Status = "FAILED"; Reason = "PLAYERS_MISSING" } }
+    try { $capturedAt = [DateTime]::Parse([string]$json.capturedAt).ToUniversalTime() } catch { return [ordered]@{ Status = 'FAILED'; Reason = 'CAPTURED_AT_INVALID' } }
+    if ($capturedAt -lt $StartedAt.AddSeconds(-1)) { return [ordered]@{ Status = 'FAILED'; Reason = 'CAPTURED_AT_STALE' } }
+    if (($json.nativeCount -lt 1) -or ($json.nativeCount -gt 260)) { return [ordered]@{ Status = 'FAILED'; Reason = 'NATIVE_COUNT_INVALID' } }
+    if (($json.rowCount -lt 1) -or ($json.rowCount -gt 260)) { return [ordered]@{ Status = 'FAILED'; Reason = 'ROW_COUNT_INVALID' } }
+    if ($null -eq $json.players) { return [ordered]@{ Status = 'FAILED'; Reason = 'PLAYERS_MISSING' } }
     $players = @($json.players)
-    if ($players.Count -ne [int]$json.rowCount) { return [ordered]@{ Status = "FAILED"; Reason = "ROW_COUNT_MISMATCH" } }
-    foreach ($player in $players) {
-        foreach ($field in @("position", "name", "sr", "xuid")) {
-            if (-not ($player.PSObject.Properties.Name -contains $field)) { return [ordered]@{ Status = "FAILED"; Reason = "PLAYER_FIELD_MISSING:$field" } }
-        }
+    if ($players.Count -ne [int]$json.rowCount) { return [ordered]@{ Status = 'FAILED'; Reason = 'ROW_COUNT_MISMATCH' } }
+    $seenXuids = @{}; $previousPosition = 0; $previousSr = $null; $fingerprintRows = New-Object System.Collections.Generic.List[string]
+    for ($index = 0; $index -lt $players.Count; $index++) {
+        $player = $players[$index]
+        foreach ($field in @('position', 'name', 'sr', 'xuid')) { if (-not ($player.PSObject.Properties.Name -contains $field)) { return [ordered]@{ Status = 'FAILED'; Reason = "PLAYER_FIELD_MISSING:$field" } } }
+        $position = [int]$player.position; $sr = [int]$player.sr; $xuid = [string]$player.xuid; $ordinal = $index + 1
+        if (($position -lt 1) -or ($position -gt $ordinal) -or ($sr -le 0) -or [string]::IsNullOrWhiteSpace($xuid) -or [string]::IsNullOrWhiteSpace([string]$player.name)) { return [ordered]@{ Status = 'FAILED'; Reason = 'PLAYER_STRUCTURE_INVALID' } }
+        if ($seenXuids.ContainsKey($xuid)) { return [ordered]@{ Status = 'FAILED'; Reason = 'PLAYER_XUID_DUPLICATE' } }; $seenXuids[$xuid] = $true
+        if ($previousSr -ne $null) { if ($sr -gt $previousSr) { return [ordered]@{ Status = 'FAILED'; Reason = 'SR_ORDER_INVALID' } }; if (($sr -eq $previousSr -and $position -ne $previousPosition) -or ($sr -lt $previousSr -and $position -ne $ordinal)) { return [ordered]@{ Status = 'FAILED'; Reason = 'RANK_SEQUENCE_INVALID' } } }
+        $previousPosition = $position; $previousSr = $sr; $fingerprintRows.Add(($xuid + '|' + $position + '|' + $sr))
     }
+    $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes(($fingerprintRows -join "`n")); $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($fingerprintBytes))
     $safePlayers = @($players | ForEach-Object { [ordered]@{ position = [int]$_.position; sr = [int]$_.sr; name = [string]$_.name } })
-    return [ordered]@{ Status = "OK"; Rows = [int]$json.rowCount; CapturedAt = $capturedAt.ToString("o"); NativeCount = [int]$json.nativeCount; Players = $safePlayers }
+    return [ordered]@{ Status = 'OK'; Rows = [int]$json.rowCount; CapturedAt = $capturedAt.ToString('o'); NativeCount = [int]$json.nativeCount; Players = $safePlayers; Fingerprint = $fingerprint }
 }
-
 function Invoke-Exporter {
     param([object]$Dataset, [string]$ExpectedCodPath, [string]$ExporterSet, [object]$Identity)
     $startedAt = [DateTime]::UtcNow
@@ -386,76 +409,64 @@ function New-DynamicBnetLayout {
     return [pscustomobject]@{ platform = "battlenet"; layout = [string]$Definition.name; exporterSet = "bnet-dynamic"; bnetDefinition = $Definition }
 }
 
-function Invoke-BnetLayoutValidation {
-    param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Definition)
+function Get-CodModuleSize {
+    param([Diagnostics.Process]$Cod)
+    try { return [Int64]$Cod.MainModule.ModuleMemorySize } catch { return 0 }
+}
+
+function Invoke-BnetValidationSample {
+    param([string]$CodPath, [object]$Identity, [object]$Definition)
     $layout = New-DynamicBnetLayout -Definition $Definition
     $results = @(); foreach ($dataset in @(Get-Datasets -Layout $layout)) { $results += Invoke-Exporter -Dataset $dataset -ExpectedCodPath $CodPath -ExporterSet $layout.exporterSet -Identity $Identity }
-    $passed = ($results.Count -eq 3) -and (@($results | Where-Object { $_.Status -ne "OK" }).Count -eq 0) -and (@($results | Where-Object { $_.Rows -ne 250 -or $_.NativeCount -ne 250 }).Count -eq 0)
+    $passed = ($results.Count -eq 3) -and (@($results | Where-Object { $_.Status -ne 'OK' -or $_.Rows -ne 250 -or $_.NativeCount -ne 250 -or [string]::IsNullOrWhiteSpace([string]$_.Fingerprint) }).Count -eq 0)
     return [pscustomobject]@{ Passed = $passed; Layout = $layout; Results = $results }
 }
 
-function Read-DiscoveredBnetDefinition {
-    param([string]$Sha256)
-    if (-not (Test-Path -LiteralPath $DiscoveredLayoutsPath -PathType Leaf)) { return $null }
-    try { $cache = Get-Content -LiteralPath $DiscoveredLayoutsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
-    catch {
-        $backup = "$DiscoveredLayoutsPath.corrupt.$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss')).json"
-        Move-Item -LiteralPath $DiscoveredLayoutsPath -Destination $backup -Force
-        Write-Log "DISCOVERED_LAYOUT_CACHE_INVALID reason=CORRUPT_JSON backup=$backup"
-        return $null
+function Invoke-BnetLayoutValidation {
+    param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Definition)
+    $moduleSize = Get-CodModuleSize -Cod $Cod
+    if ($moduleSize -le 0) { return [pscustomobject]@{ Passed = $false; Reason = 'MODULE_REGION_UNAVAILABLE'; Layout = $null; Results = @() } }
+    $shape = Test-BnetLayoutDefinition -Definition $Definition -ModuleSize $moduleSize
+    if (-not $shape.Valid) { return [pscustomobject]@{ Passed = $false; Reason = $shape.Reason; Layout = $null; Results = @() } }
+    $first = Invoke-BnetValidationSample -CodPath $CodPath -Identity $Identity -Definition $Definition
+    if (-not $first.Passed) { return [pscustomobject]@{ Passed = $false; Reason = 'LIVE_SAMPLE_ONE_FAILED'; Layout = $first.Layout; Results = $first.Results } }
+    Start-Sleep -Milliseconds 250
+    $second = Invoke-BnetValidationSample -CodPath $CodPath -Identity $Identity -Definition $Definition
+    if (-not $second.Passed) { return [pscustomobject]@{ Passed = $false; Reason = 'LIVE_SAMPLE_TWO_FAILED'; Layout = $second.Layout; Results = $second.Results } }
+    for ($i = 0; $i -lt 3; $i++) {
+        if (($first.Results[$i].Rows -ne $second.Results[$i].Rows) -or ($first.Results[$i].NativeCount -ne $second.Results[$i].NativeCount) -or ($first.Results[$i].Fingerprint -ne $second.Results[$i].Fingerprint)) {
+            return [pscustomobject]@{ Passed = $false; Reason = 'REPEATED_READ_INCONSISTENT'; Layout = $first.Layout; Results = $second.Results }
+        }
     }
-    if ($null -eq $cache.battleNet) { return $null }
-    $entry = $cache.battleNet.PSObject.Properties[$Sha256]
-    if ($null -eq $entry) { return $null }
-    return $entry.Value
-}
-
-function Get-VerifiedDiscoveredBnetLayout {
-    param([object]$Identity)
-    if ([string]::IsNullOrWhiteSpace($VerifiedLayout)) { return $null }
-    $definition = Read-DiscoveredBnetDefinition -Sha256 ([string]$Identity.Value)
-    if (($null -eq $definition) -or ([string]$definition.name -ne $VerifiedLayout)) { return $null }
-    Write-Log "DISCOVERED_LAYOUT_SESSION_CACHE_HIT layout=$VerifiedLayout"
-    return New-DynamicBnetLayout -Definition $definition
-}
-
-function Write-DiscoveredBnetDefinition {
-    param([string]$Sha256, [object]$Definition, [string]$Source)
-    $entries = [ordered]@{}
-    if (Test-Path -LiteralPath $DiscoveredLayoutsPath -PathType Leaf) {
-        try { $existing = Get-Content -LiteralPath $DiscoveredLayoutsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop; if ($existing.battleNet) { foreach ($property in $existing.battleNet.PSObject.Properties) { $entries[$property.Name] = $property.Value } } }
-        catch { }
-    }
-    $entries[$Sha256] = [ordered]@{ name = [string]$Definition.name; source = $Source; validatedAtUtc = [DateTime]::UtcNow.ToString("o"); signatureRva = $Definition.signatureRva; datasets = $Definition.datasets }
-    $temp = "$DiscoveredLayoutsPath.tmp"; [ordered]@{ battleNet = $entries } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temp -Encoding UTF8; Move-Item -LiteralPath $temp -Destination $DiscoveredLayoutsPath -Force
-    Write-Log "DISCOVERED_LAYOUT_CACHED sha256=$Sha256 source=$Source"
+    return [pscustomobject]@{ Passed = $true; Reason = 'OK'; Layout = $first.Layout; Results = $second.Results }
 }
 
 function Resolve-UnknownBnetLayout {
     param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Manifest)
-    $cached = Read-DiscoveredBnetDefinition -Sha256 ([string]$Identity.Value)
-    if ($null -ne $cached) {
-        $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $cached
-        if ($validation.Passed) { return $validation.Layout }
-        Write-Log "DISCOVERED_LAYOUT_CACHE_INVALID sha256=$($Identity.Value) reason=RUNTIME_VALIDATION_FAILED"
+    $sha = [string]$Identity.Value
+    $cached = Read-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha
+    if ($cached.Status -eq 'OK') {
+        Write-Log "LAYOUT_CACHE_LOADED sha=$sha"
+        $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $cached.Definition
+        if ($validation.Passed) { Write-Log "LAYOUT_VALIDATION_OK source=cache"; return $validation.Layout }
+        Write-Log "LAYOUT_CACHE_REJECTED reason=$($validation.Reason)"
     }
-    foreach ($property in @($Manifest.battlenetLayoutDefinitions.PSObject.Properties | Sort-Object { [int]$_.Value.priority } -Descending)) {
-        $definition = $property.Value; $definition | Add-Member -NotePropertyName name -NotePropertyValue $property.Name -Force
-        Write-Log "KNOWN_LAYOUT_PROBE $($property.Name) START"
-        $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $definition
-        Write-Log ("KNOWN_LAYOUT_PROBE {0} {1}" -f $property.Name, $(if ($validation.Passed) { "PASS" } else { "FAIL" }))
-        if ($validation.Passed) { Write-DiscoveredBnetDefinition -Sha256 ([string]$Identity.Value) -Definition $definition -Source "known-layout-probe"; return $validation.Layout }
-    }
-    Write-Log "SIGNATURE_DISCOVERY_START sha256=$($Identity.Value)"
-    try { $definition = Get-BnetLayoutFromSignature -CodPath $CodPath; Write-Log "SIGNATURE_DISCOVERY_MATCH signatureRva=$($definition.signatureRva)" }
-    catch { Write-Log "SIGNATURE_DISCOVERY_FAIL reason=$($_.Exception.Message)"; return $null }
-    $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $definition
-    if (-not $validation.Passed) { Write-Log "SIGNATURE_DISCOVERY_FAIL reason=RUNTIME_VALIDATION_FAILED"; return $null }
-    Write-Log "DISCOVERED_LAYOUT_VALIDATED sha256=$($Identity.Value)"
-    Write-DiscoveredBnetDefinition -Sha256 ([string]$Identity.Value) -Definition $definition -Source "signature-discovery"
+    elseif ($cached.Status -eq 'REJECTED') { Write-Log "LAYOUT_CACHE_REJECTED reason=$($cached.Reason)" }
+
+    Write-Log "LAYOUT_DISCOVERY_START"
+    $discovery = Get-BnetStaticDiscoveryCandidates -CodPath $CodPath -Sha256 $sha -Catalog $Manifest.battlenetDiscovery
+    $decision = Select-BnetDiscoveryCandidate -Candidates $discovery.Candidates
+    if ($decision.Status -eq 'AMBIGUOUS') { Write-Log "LAYOUT_DISCOVERY_AMBIGUOUS candidates=$($decision.Count)"; return $null }
+    if ($decision.Status -ne 'SINGLE') { Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)"; return $null }
+    Write-Log "LAYOUT_CANDIDATE_FOUND method=$($decision.MethodVersion)"
+
+    $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $decision.Candidate
+    if (-not $validation.Passed) { Write-Log "LAYOUT_VALIDATION_FAILED reason=$($validation.Reason)"; Write-Log "LAYOUT_DISCOVERY_FAILED reason=RUNTIME_VALIDATION_FAILED"; return $null }
+    [void](Write-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha -Definition $decision.Candidate -MethodVersion $decision.MethodVersion)
+    Write-Log "LAYOUT_VALIDATION_OK source=static-anchors"
+    Write-Log "LAYOUT_DISCOVERY_OK layoutId=$($decision.Candidate.name) sha=$sha"
     return $validation.Layout
 }
-
 function Write-Status {
     param([int]$CodPid, [string]$CodPath, [string]$CodSha256, [string]$RuntimeBuildId, [string]$Platform, [string]$Layout, [string]$CycleStatus, [object[]]$Datasets, [hashtable]$Results)
     $datasetStatuses = [ordered]@{}
@@ -510,6 +521,17 @@ if ($IntervalSeconds -lt 1) { throw "IntervalSeconds must be at least 1." }
 if ($InitialDelaySeconds -lt 0) { throw "InitialDelaySeconds cannot be negative." }
 New-Item -ItemType Directory -Force -Path $LogsRoot | Out-Null
 $manifest = Get-BuildManifest
+if ($StaticDiscoveryOnly) {
+    if ([string]::IsNullOrWhiteSpace($StaticCodPath) -or -not (Test-Path -LiteralPath $StaticCodPath -PathType Leaf)) { throw "STATIC_DISCOVERY_COD_PATH_REQUIRED" }
+    $computedSha = (Get-FileHash -LiteralPath $StaticCodPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($StaticDiscoverySha256) -and -not [string]::Equals($computedSha, $StaticDiscoverySha256, [StringComparison]::OrdinalIgnoreCase)) { throw "STATIC_DISCOVERY_SHA_MISMATCH" }
+    $probe = Get-BnetStaticDiscoveryCandidates -CodPath $StaticCodPath -Sha256 $computedSha -Catalog $manifest.battlenetDiscovery
+    $decision = Select-BnetDiscoveryCandidate -Candidates $probe.Candidates
+    $diagnostic = [ordered]@{ sha256 = $computedSha; status = $decision.Status; candidates = $decision.Count; reason = $probe.Reason }
+    if ($EmitJson) { [Console]::Out.WriteLine(($diagnostic | ConvertTo-Json -Compress)) }
+    else { Write-Host ("LAYOUT_DISCOVERY_DIAGNOSTIC sha={0} status={1} candidates={2} reason={3}" -f $diagnostic.sha256, $diagnostic.status, $diagnostic.candidates, $diagnostic.reason) }
+    exit 0
+}
 $trackedPid = $null; $lastWaitState = $null; $activeLayout = $null; $activeIdentity = $null
 
 while ($true) {
@@ -533,17 +555,13 @@ while ($true) {
         }
         $activeLayout = Get-BuildLayout -Manifest $manifest -Identity $activeIdentity
         if (($null -eq $activeLayout) -and ($activeIdentity.Type -eq "sha256") -and ($activeIdentity.PlatformHint -eq "battlenet")) {
-            $activeLayout = Get-VerifiedDiscoveredBnetLayout -Identity $activeIdentity
-            if ($null -ne $activeLayout) { Write-Log "KNOWN_LAYOUT_PROBE $VerifiedLayout PASS source=session-cache" }
-        }
-        if (($null -eq $activeLayout) -and ($activeIdentity.Type -eq "sha256") -and ($activeIdentity.PlatformHint -eq "battlenet")) {
             if ($InitialDelaySeconds -gt 0) {
                 Start-Sleep -Seconds $InitialDelaySeconds; $initialDelayApplied = $true
                 $check = Get-CodState
                 if (($check.State -ne "FOUND") -or ($check.Candidate.Process.Id -ne $trackedPid)) { Write-Log "COD_CHANGED_DURING_INITIAL_DELAY"; $trackedPid = $null; $activeLayout = $null; $activeIdentity = $null; continue }
                 $cod = $check.Candidate.Process; $codPath = $check.Candidate.Path
             }
-            Write-Log "UNKNOWN_BUILD $($activeIdentity.Value)"
+            Write-Log "BUILD_UNKNOWN sha=$($activeIdentity.Value)"
             $activeLayout = Resolve-UnknownBnetLayout -Cod $cod -CodPath $codPath -Identity $activeIdentity -Manifest $manifest
         }
         $platform = if ($null -eq $activeLayout) { if ($activeIdentity.PlatformHint) { $activeIdentity.PlatformHint } else { "unknown" } } else { $activeLayout.platform }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.24-alpha
+
+- Add fail-closed Battle.net layout autodiscovery framework with exact-SHA cache revalidation and deterministic multi-anchor requirements.
+- Prevent Watcher restart loops when a build/layout is explicitly unsupported.
+
 ## 0.1.23-alpha
 
 - Add an opt-in simplified station watcher that uses local collection health only and restarts Battle.net Call of Duty through the validated Play flow.

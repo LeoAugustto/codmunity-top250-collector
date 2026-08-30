@@ -8,6 +8,7 @@ public enum StationWatcherState
     WaitingForBattleNet,
     WaitingForCod,
     WaitingForData,
+    LayoutUnsupported,
     Healthy,
     Offline,
     RecoveryCooldown,
@@ -89,6 +90,7 @@ public sealed class StationWatcher
     private bool recoveryActive;
     private bool offlineLogged;
     private bool localStaleLogged;
+    private bool layoutUnsupportedLogged;
     private DateTimeOffset? deferredCycleStartedUtc;
     private bool codObservedDuringLaunch;
     private DateTimeOffset nextLaunchAttemptUtc;
@@ -292,7 +294,19 @@ public sealed class StationWatcher
     }
     private async Task MonitorHealthyCodAsync(StationCodProcess cod, DateTimeOffset now, CancellationToken token)
     {
-        var lastLocalSuccess = collection().LastSuccess;
+        var localSnapshot = collection();
+        if (localSnapshot.CycleStatus is "UNSUPPORTED_BUILD" or "LAYOUT_DISCOVERY_FAILED" or "LAYOUT_DISCOVERY_AMBIGUOUS")
+        {
+            if (!layoutUnsupportedLogged)
+            {
+                log("WATCHER_LAYOUT_UNSUPPORTED", "cycleStatus=" + localSnapshot.CycleStatus);
+                layoutUnsupportedLogged = true;
+            }
+            SetState(StationWatcherState.LayoutUnsupported, "Layout support required; COD recovery paused");
+            return;
+        }
+        layoutUnsupportedLogged = false;
+        var lastLocalSuccess = localSnapshot.LastSuccess;
         var healthBaseline = lastLocalSuccess is { } last && last >= cod.StartedAtUtc ? last : cod.StartedAtUtc;
         if (now - healthBaseline < configuration.StaleAfter)
         {

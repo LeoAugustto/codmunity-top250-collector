@@ -28,6 +28,10 @@
       "exporterSet": "xbox"
     }
   },
+  "battlenetDiscovery": {
+    "schemaVersion": 1,
+    "methods": []
+  },
   "battlenetLayoutDefinitions": {
     "bnet-20260820": {
       "priority": 3,

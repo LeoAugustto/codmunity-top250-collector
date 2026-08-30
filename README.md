@@ -57,14 +57,22 @@ The MSI is an internal package for the signed automatic-update flow (`manifest` 
 
 ### Same-version development validation
 
-Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.23-alpha over an already installed 0.1.23-alpha in place.
+Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.24-alpha over an already installed 0.1.24-alpha in place.
 
 After generating the portable, MSI, and Setup artifacts, close the Collector and run:
 
-    .\tools\validate-local-install.ps1 -Version '0.1.23-alpha' -ReplaceAndValidate
+    .\tools\validate-local-install.ps1 -Version '0.1.24-alpha' -ReplaceAndValidate
 
 The helper performs a clean registered Setup uninstall, opens the normal interactive Setup install, then SHA-256 compares every portable payload file with its installed counterpart. It fails if any installed file is stale, missing, or differs. This workflow is for same-version development validation only; normal releases and the signed MSI updater flow are unchanged.
 
+
+### Battle.net layout discovery
+
+Known executable SHA-256 values always use their versioned official layout. For an unknown Battle.net build, the discovery path accepts only one deterministic set of nine independently matched static anchors (state, count, and entry start for MP, BR, and Resurgence), then performs two complete live extraction validations before caching technical offsets at `%LOCALAPPDATA%\CODMunity\Top250Collector\layouts\discovered\<SHA256>.json`. Cache entries are revalidated on every use and do not store player data. If no unique validated candidate exists, collection fails closed and the Watcher pauses COD recovery for that explicit layout-support failure.
+
+The 0.1.24 development catalog intentionally contains no unverified signature method; it will refuse an unknown build until reproducible signature evidence is added.
+
+See [Battle.net layout evidence workflow](docs/BATTLE-NET-LAYOUT-EVIDENCE.md) for the static baseline capture and next-update procedure.
 ## Release flow
 
 1. Build and validate locally.
@@ -72,7 +80,7 @@ The helper performs a clean registered Setup uninstall, opens the normal interac
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.23-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.24-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.

@@ -25,8 +25,8 @@ try
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
-    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.23-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.23-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.24-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.24-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
     var ptBr = CultureInfo.GetCultureInfo("pt-BR");
@@ -38,6 +38,9 @@ try
     StartupRegistrationTests();
     StationWatcherTests().GetAwaiter().GetResult();
     SafeModeNativeDialogContractTests();
+    LayoutDiscoveryContractTests();
+    LayoutEvidenceCaptureContractTests();
+    LiveEvidenceCaptureContractTests();
     InstallerLaunchContractTests();
     ReleaseSigningTests(root);
     PrivateUpdaterTests(root);
@@ -207,6 +210,69 @@ static async Task StationWatcherTests()
         now = now.AddSeconds(3);
     }
     if (crashPlatform.CloseCalls != 3 || crashPlatform.LaunchCalls != 0 || crashWatcher.Snapshot.State != StationWatcherState.CrashLoopBackoff) throw new Exception("kill failure proceeded to Battle.net or skipped crash-loop backoff");
+
+    var unsupportedPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(801, now.AddMinutes(-30)), InternetAvailable = true };
+    var unsupportedSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: "UNSUPPORTED_BUILD");
+    var unsupportedWatcher = new StationWatcher(() => settings, () => unsupportedSnapshot, unsupportedPlatform, (_, _) => { }, () => now, config);
+    await unsupportedWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (unsupportedWatcher.Snapshot.State != StationWatcherState.LayoutUnsupported || unsupportedPlatform.CloseCalls != 0 || unsupportedPlatform.LaunchCalls != 0) throw new Exception("unsupported build caused Watcher recovery");
+}
+static void LayoutDiscoveryContractTests()
+{
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var engineRoot = Path.Combine(repositoryRoot, "engine");
+    var modulePath = Path.Combine(engineRoot, "layout_discovery.psm1");
+    var orchestratorPath = Path.Combine(engineRoot, "top250_orchestrator.ps1");
+    var manifestPath = Path.Combine(engineRoot, "build_layouts.json");
+    if (!File.Exists(modulePath) || !File.Exists(orchestratorPath)) throw new Exception("layout discovery module missing");
+    var orchestrator = File.ReadAllText(orchestratorPath);
+    if (!orchestrator.Contains("Get-BuildLayout -Manifest $manifest -Identity $activeIdentity", StringComparison.Ordinal) ||
+        !orchestrator.Contains("Resolve-UnknownBnetLayout", StringComparison.Ordinal) ||
+        !orchestrator.Contains("LAYOUT_DISCOVERY_AMBIGUOUS", StringComparison.Ordinal) ||
+        !orchestrator.Contains("LAYOUT_CACHE_REJECTED", StringComparison.Ordinal) ||
+        orchestrator.Contains("Get-BnetLayoutFromSignature", StringComparison.Ordinal))
+        throw new Exception("layout discovery fail-closed routing contract");
+    using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+    var known = manifest.RootElement.GetProperty("sha256Builds").GetProperty("97413B95AA94A9694690BA70B16189E4827E2B363850F873387E8A88101D4FE4");
+    if (known.GetProperty("layout").GetString() != "bnet-20260820" || known.GetProperty("exporterSet").GetString() != "bnet-dynamic" ||
+        manifest.RootElement.GetProperty("battlenetDiscovery").GetProperty("methods").GetArrayLength() != 0)
+        throw new Exception("known build bypass or untrusted discovery catalog contract");
+    var testScript = Path.Combine(repositoryRoot, "tools", "test-layout-discovery.ps1");
+    var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
+    {
+        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, WorkingDirectory = repositoryRoot
+    };
+    psi.ArgumentList.Add("-NoProfile"); psi.ArgumentList.Add("-NonInteractive"); psi.ArgumentList.Add("-ExecutionPolicy"); psi.ArgumentList.Add("Bypass"); psi.ArgumentList.Add("-File"); psi.ArgumentList.Add(testScript);
+    using var process = Process.Start(psi) ?? throw new Exception("layout discovery test did not start");
+    var stdout = process.StandardOutput.ReadToEnd(); var stderr = process.StandardError.ReadToEnd(); process.WaitForExit();
+    if (process.ExitCode != 0 || !stdout.Contains("LAYOUT_DISCOVERY_TESTS_OK", StringComparison.Ordinal)) throw new Exception("layout discovery tests failed: " + stderr);
+}
+static void LayoutEvidenceCaptureContractTests()
+{
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var capturePath = Path.Combine(repositoryRoot, "tools", "capture-layout-evidence.ps1");
+    var workflowPath = Path.Combine(repositoryRoot, "docs", "BATTLE-NET-LAYOUT-EVIDENCE.md");
+    var capture = File.ReadAllText(capturePath);
+    var workflow = File.ReadAllText(workflowPath);
+    if (!capture.Contains("static-file-only", StringComparison.Ordinal) ||
+        !capture.Contains("RVA_NOT_FILE_BACKED", StringComparison.Ordinal) ||
+        !capture.Contains("Find-NearbyRipRelativeReferences", StringComparison.Ordinal) ||
+        !capture.Contains("97413B95AA94A9694690BA70B16189E4827E2B363850F873387E8A88101D4FE4", StringComparison.Ordinal) ||
+        capture.Contains("ReadProcessMemory", StringComparison.Ordinal) || capture.Contains("OpenProcess", StringComparison.Ordinal) || capture.Contains("Get-Process", StringComparison.Ordinal) ||
+        !workflow.Contains("Next COD update procedure", StringComparison.Ordinal) || !workflow.Contains("fail-closed", StringComparison.Ordinal))
+        throw new Exception("layout evidence capture safety contract");
+}
+static void LiveEvidenceCaptureContractTests()
+{
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var capturePath = Path.Combine(repositoryRoot, "tools", "capture-live-layout-evidence.ps1");
+    var capture = File.ReadAllText(capturePath);
+    if (!capture.Contains("PROCESS_VM_READ", StringComparison.Ordinal) || !capture.Contains("PROCESS_QUERY_LIMITED_INFORMATION", StringComparison.Ordinal) ||
+        !capture.Contains("LIVE_EVIDENCE_SKIPPED reason=COD_NOT_RUNNING", StringComparison.Ordinal) || !capture.Contains("playerDataStored=$false", StringComparison.Ordinal) ||
+        !capture.Contains("entry0BytesRedacted=$true", StringComparison.Ordinal) || !capture.Contains("reference-analysis.json", StringComparison.Ordinal) || capture.Contains("$LASTEXITCODE", StringComparison.Ordinal) || capture.Contains("HashData", StringComparison.Ordinal) || capture.Contains("ToHexString", StringComparison.Ordinal) ||
+        capture.Contains("WriteProcessMemory", StringComparison.Ordinal) || capture.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
+        capture.Contains("VirtualProtectEx", StringComparison.Ordinal) || capture.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("live evidence capture read-only safety contract");
 }
 static void InstallerLaunchContractTests()
 {
