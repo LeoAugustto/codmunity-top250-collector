@@ -129,6 +129,7 @@ public partial class MainWindow : Window
                 ApiSyncState.Ok => ($"Synced to CODMunity • {DateTimeOffset.Now.ToLocalTime().ToString("t", CultureInfo.CurrentCulture)}", "Green"),
                 ApiSyncState.Failed => ("CODMunity sync failed", "Red"),
                 ApiSyncState.NotConfigured => ("API not configured", "Gray"),
+                ApiSyncState.Skipped when dataset.Players == 0 => ("No Top 250 players yet • No sync required", "Gray"),
                 _ => ("Waiting to sync", "Yellow")
             };
             SetDataset(players, status, apiStatus, dot, (dataset.Players ?? 0).ToString(), saved, api, color); return;

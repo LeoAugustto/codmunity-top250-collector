@@ -48,7 +48,7 @@ public sealed class RankedPlayersApiClient : IDisposable
     public static bool TryValidateNativeLeaderboard(IEnumerable<RankedPlayer>? players, out IReadOnlyList<RankedPlayer> validated, out string reason)
     {
         var all = players?.ToArray() ?? Array.Empty<RankedPlayer>();
-        if (all.Length != 250) { validated = Array.Empty<RankedPlayer>(); reason = "players-not-250"; return false; }
+        if (all.Length is < 1 or > 250) { validated = Array.Empty<RankedPlayer>(); reason = "players-count-invalid"; return false; }
         var minPosition = all.Min(p => p.Position); var maxPosition = all.Max(p => p.Position);
         if (all.Any(p => p.Position is < 1 or > 250)) { validated = Array.Empty<RankedPlayer>(); reason = $"positions-invalid rows={all.Length} minPosition={minPosition} maxPosition={maxPosition}"; return false; }
         // COD leaderboard positions are display ranks: SR ties may repeat a position and create gaps.
@@ -62,14 +62,14 @@ public sealed class RankedPlayersApiClient : IDisposable
         validated = all; reason = ""; return true;
     }
 
-    // The API owns a complete 1..250 slot set, so map each native row to its ordinal.
+    // The API receives only the currently populated ordinal slots; native display ranks may contain ties and gaps.
     public static IReadOnlyList<RankedPlayer> MapToApiOrdinalPositions(IReadOnlyList<RankedPlayer> nativeRows) =>
         nativeRows.Select((player, index) => new RankedPlayer(index + 1, player.Sr, player.Name)).ToArray();
 
     public static bool TryValidateApiRequestPlayers(IEnumerable<RankedPlayer>? players, out IReadOnlyList<RankedPlayer> validated, out string reason)
     {
         var all = players?.ToArray() ?? Array.Empty<RankedPlayer>();
-        if (all.Length != 250) { validated = Array.Empty<RankedPlayer>(); reason = "players-not-250"; return false; }
+        if (all.Length is < 1 or > 250) { validated = Array.Empty<RankedPlayer>(); reason = "players-count-invalid"; return false; }
         for (var index = 0; index < all.Length; index++)
         {
             if (all[index].Position != index + 1) { validated = Array.Empty<RankedPlayer>(); reason = "api-positions-invalid"; return false; }
@@ -84,7 +84,9 @@ public sealed class RankedPlayersApiClient : IDisposable
 
     public async Task<ApiSyncResult> SyncAsync(string mode, IEnumerable<RankedPlayer>? players, CancellationToken token)
     {
-        if (!TryValidateNativeLeaderboard(players, out var nativeRows, out var reason)) { log.Write("API_SYNC_SKIPPED", $"mode={mode} reason={reason}"); return new(ApiSyncState.Skipped, Reason: reason); }
+        var sourceRows = players?.ToArray() ?? Array.Empty<RankedPlayer>();
+        if (sourceRows.Length == 0) { log.Write("API_SYNC_SKIPPED", $"mode={mode} reason=empty-leaderboard"); return new(ApiSyncState.Skipped, Reason: "empty-leaderboard"); }
+        if (!TryValidateNativeLeaderboard(sourceRows, out var nativeRows, out var reason)) { log.Write("API_SYNC_SKIPPED", $"mode={mode} reason={reason}"); return new(ApiSyncState.Skipped, Reason: reason); }
         var apiRows = MapToApiOrdinalPositions(nativeRows);
         if (!TryValidateApiRequestPlayers(apiRows, out var valid, out reason)) { log.Write("API_SYNC_SKIPPED", $"mode={mode} reason={reason}"); return new(ApiSyncState.Skipped, Reason: reason); }
         var bearer = tokenProvider.GetToken();
@@ -94,7 +96,7 @@ public sealed class RankedPlayersApiClient : IDisposable
             var started = Stopwatch.GetTimestamp();
             try
             {
-                log.Write("API_SYNC_START", $"mode={mode} players=250");
+                log.Write("API_SYNC_START", $"mode={mode} players={valid.Count}");
                 using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
                 request.Content = new StringContent(JsonSerializer.Serialize(new { mode, players = valid.Select(p => new { position = p.Position, sr = p.Sr, name = p.Name }) }), Encoding.UTF8, "application/json");

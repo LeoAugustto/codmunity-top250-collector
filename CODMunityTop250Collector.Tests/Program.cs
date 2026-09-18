@@ -16,6 +16,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 var root = Path.Combine(Path.GetTempPath(), "CODMunityTop250CollectorTests", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); CollectorPaths.RootOverride = root;
+if (args.Length == 1 && string.Equals(args[0], "--live-api-sync", StringComparison.Ordinal))
+{
+    try { await LiveApiSyncFromStandardInput(); }
+    finally { CollectorPaths.RootOverride = null; Directory.Delete(root, true); }
+    return;
+}
 try
 {
     var log = new AppLogger(); var parser = new EngineStatusParser(); var store = new SettingsStore(log);
@@ -43,12 +49,13 @@ try
     LayoutEvidenceCaptureContractTests();
     LiveEvidenceCaptureContractTests();
     LiveRowEvidenceCaptureContractTests();
+    TemporalEvidenceCaptureContractTests();
     InstallerLaunchContractTests();
     ReleaseSigningTests(root);
     PrivateUpdaterTests(root);
     AutomaticUpdateTests(root);
     File.WriteAllBytes(Path.Combine(CollectorPaths.Logs, "app.log"), new byte[5 * 1024 * 1024]); log.Write("TEST"); if (!File.Exists(Path.Combine(CollectorPaths.Logs, "app.1.log"))) throw new Exception("log rotation");
-    ApiSyncTests(log).GetAwaiter().GetResult();
+    ApiSyncTests(log, root).GetAwaiter().GetResult();
     UnicodeMachineReadableTransportTests();
     BuildIdentityCacheTests(log).GetAwaiter().GetResult();
     SchedulerBuildIdentityIntegrationTests(log).GetAwaiter().GetResult();
@@ -260,6 +267,13 @@ static void LayoutDiscoveryContractTests()
     if (known.GetProperty("layout").GetString() != "bnet-20260820" || known.GetProperty("exporterSet").GetString() != "bnet-dynamic" ||
         manifest.RootElement.GetProperty("battlenetDiscovery").GetProperty("methods").GetArrayLength() != 0)
         throw new Exception("known build bypass or untrusted discovery catalog contract");
+    var season6 = manifest.RootElement.GetProperty("sha256Builds").GetProperty("DA8DE033EFE34B77DA0D6014EFFA9C551C0E30A3CFB4A3B39A52D6B86AD03A09");
+    var season6Definition = manifest.RootElement.GetProperty("battlenetLayoutDefinitions").GetProperty("bnet-20260918").GetProperty("datasets");
+    if (season6.GetProperty("layout").GetString() != "bnet-20260918" || season6.GetProperty("exporterSet").GetString() != "bnet-dynamic" ||
+        season6Definition.GetProperty("mp").GetProperty("stateRva").GetString() != "0x12BDED10" || season6Definition.GetProperty("mp").GetProperty("countRva").GetString() != "0x12C1A45C" || season6Definition.GetProperty("mp").GetProperty("entry0Rva").GetString() != "0x12C1A460" ||
+        season6Definition.GetProperty("br").GetProperty("stateRva").GetString() != "0x12C60E00" || season6Definition.GetProperty("br").GetProperty("countRva").GetString() != "0x12C9C54C" || season6Definition.GetProperty("br").GetProperty("entry0Rva").GetString() != "0x12C9C550" ||
+        season6Definition.GetProperty("resurgence").GetProperty("stateRva").GetString() != "0x12CE2EF0" || season6Definition.GetProperty("resurgence").GetProperty("countRva").GetString() != "0x12D1E63C" || season6Definition.GetProperty("resurgence").GetProperty("entry0Rva").GetString() != "0x12D1E640")
+        throw new Exception("season 06 static Battle.net layout contract");
     var testScript = Path.Combine(repositoryRoot, "tools", "test-layout-discovery.ps1");
     var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"))
     {
@@ -309,6 +323,102 @@ static void LiveRowEvidenceCaptureContractTests()
         capture.Contains("CreateRemoteThread", StringComparison.Ordinal) || capture.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
         capture.Contains("Process.Start", StringComparison.Ordinal))
         throw new Exception("live row evidence capture read-only safety contract");
+}
+static void TemporalEvidenceCaptureContractTests()
+{
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var capture = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "capture-layout-temporal-baseline.ps1"));
+    var comparison = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "compare-layout-temporal-baselines.ps1"));
+    var targetedCapture = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "capture-targeted-temporal-evidence.ps1"));
+    var targetedComparison = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "compare-targeted-temporal-evidence.ps1"));
+    var targetedTriangulation = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "triangulate-targeted-temporal-evidence.ps1"));
+    var scalarCapture = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "capture-top250-candidate-scalars.ps1"));
+    var scalarComparison = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "compare-top250-candidate-scalars.ps1"));
+    var recordContractProbe = File.ReadAllText(Path.Combine(repositoryRoot, "tools", "probe-top250-record-contract.ps1"));
+    if (!capture.Contains("season06_top250_empty_baseline", StringComparison.Ordinal) ||
+        !capture.Contains("season06_top250_populated", StringComparison.Ordinal) ||
+        !capture.Contains("PROCESS_VM_READ", StringComparison.Ordinal) ||
+        !capture.Contains("moduleRelative = $true", StringComparison.Ordinal) ||
+        !capture.Contains("writableCommittedOnly = $true", StringComparison.Ordinal) ||
+        !capture.Contains("playerNamesStored = $false", StringComparison.Ordinal) ||
+        !capture.Contains("playerXuidsStored = $false", StringComparison.Ordinal) ||
+        !capture.Contains("playerRecordBytesStored = $false", StringComparison.Ordinal) ||
+        capture.Contains("WriteProcessMemory", StringComparison.Ordinal) ||
+        capture.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
+        capture.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
+        capture.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("temporal evidence capture read-only privacy contract");
+    if (!comparison.Contains("hash-changed", StringComparison.Ordinal) ||
+        !comparison.Contains("newly-committed-or-topology-changed", StringComparison.Ordinal) ||
+        !comparison.Contains("disappeared-or-topology-changed", StringComparison.Ordinal) ||
+        !comparison.Contains("TEMPORAL_BASELINE_SHA_MISMATCH", StringComparison.Ordinal))
+        throw new Exception("temporal evidence comparison contract");
+    if (!targetedCapture.Contains("season06_targeted_empty", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("season06_targeted_populated", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("RvaStart = 0x128BE000L", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("RvaEndExclusive = 0x12DBE000L", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("BlockBytes = 4096", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("PROCESS_VM_READ", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("playerNamesStored=$false", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("playerXuidsStored=$false", StringComparison.Ordinal) ||
+        !targetedCapture.Contains("playerRecordBytesStored=$false", StringComparison.Ordinal) ||
+        targetedCapture.Contains("WriteProcessMemory", StringComparison.Ordinal) ||
+        targetedCapture.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
+        targetedCapture.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
+        targetedCapture.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("targeted temporal evidence capture read-only privacy contract");
+    if (!targetedComparison.Contains("TARGETED_TEMPORAL_SCOPE_MISMATCH", StringComparison.Ordinal) ||
+        !targetedComparison.Contains("hash-changed", StringComparison.Ordinal) ||
+        !targetedComparison.Contains("unreadable", StringComparison.Ordinal))
+        throw new Exception("targeted temporal comparison contract");
+    if (!targetedTriangulation.Contains("TARGETED_TRIANGULATION_SCOPE_MISMATCH", StringComparison.Ordinal) ||
+        !targetedTriangulation.Contains("all-three-different", StringComparison.Ordinal) ||
+        !targetedTriangulation.Contains("rawPageBytesStored=$false", StringComparison.Ordinal) ||
+        targetedTriangulation.Contains("ReadProcessMemory", StringComparison.Ordinal) ||
+        targetedTriangulation.Contains("WriteProcessMemory", StringComparison.Ordinal))
+        throw new Exception("targeted temporal triangulation privacy contract");
+    var requiredCandidatePages = new[]
+    {
+        "0x129B6000L", "0x12A03000L", "0x12B0A000L", "0x12B9B000L", "0x12B9C000L", "0x12BDE000L",
+        "0x12C60000L", "0x12CE2000L", "0x12D67000L", "0x12D80000L", "0x12D97000L", "0x12D99000L",
+        "0x12D81000L", "0x12D94000L", "0x12D95000L", "0x12B24000L", "0x12C1B000L", "0x12C1C000L", "0x12C1D000L"
+    };
+    if (requiredCandidatePages.Any(page => !scalarCapture.Contains(page, StringComparison.Ordinal)) ||
+        !scalarCapture.Contains("PROCESS_VM_READ", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("PROCESS_QUERY_LIMITED_INFORMATION", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("ObservedPopulation", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("PopulationVerified", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("UiState", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("rawPageBytesStored = $false", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("stringsStored = $false", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("playerNamesStored = $false", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("playerXuidsStored = $false", StringComparison.Ordinal) ||
+        !scalarCapture.Contains("$value -le 250", StringComparison.Ordinal) ||
+        scalarCapture.Contains("WriteProcessMemory", StringComparison.Ordinal) ||
+        scalarCapture.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
+        scalarCapture.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
+        scalarCapture.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("candidate scalar capture read-only privacy contract");
+    if (!scalarComparison.Contains("CANDIDATE_SCALAR_SCOPE_MISMATCH", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("exact-population-follower", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("state-like-small-transition", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("ObservationOverrides", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("populationVerified", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("StableSecondThirdButFirstDifferent", StringComparison.Ordinal) ||
+        !scalarComparison.Contains("rawPageBytesStored = $false", StringComparison.Ordinal))
+        throw new Exception("candidate scalar comparison contract");
+    if (!recordContractProbe.Contains("RvaStart = 0x128BE000L", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("RvaEndExclusive = 0x12DBE000L", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("recordStrideHypothesis = '0x458'", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("PROCESS_VM_READ", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("PROCESS_QUERY_LIMITED_INFORMATION", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("playerNamesStored = $false", StringComparison.Ordinal) ||
+        !recordContractProbe.Contains("playerXuidsStored = $false", StringComparison.Ordinal) ||
+        recordContractProbe.Contains("WriteProcessMemory", StringComparison.Ordinal) ||
+        recordContractProbe.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
+        recordContractProbe.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
+        recordContractProbe.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("record contract probe read-only privacy contract");
 }
 static void InstallerLaunchContractTests()
 {
@@ -361,7 +471,7 @@ static void StartupRegistrationTests()
 static bool MsiLaunchAllowed(bool checkboxSelected, bool installed, bool majorUpgradeDetected, int uiLevel, bool removeAll, bool reinstall)
     => checkboxSelected && uiLevel >= 4 && !removeAll && !reinstall && (!installed || majorUpgradeDetected);
 
-static async Task ApiSyncTests(AppLogger log)
+static async Task ApiSyncTests(AppLogger log, string root)
 {
     var rows = Enumerable.Range(1, 250).Select(i => new RankedPlayer(i, 30000 - i, "player-" + i)).ToArray();
     if (!RankedPlayersApiClient.TryValidateNativeLeaderboard(rows, out _, out _)) throw new Exception("valid native leaderboard rejected");
@@ -387,7 +497,11 @@ static async Task ApiSyncTests(AppLogger log)
     if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Position = -1 } : p), out _, out _)) throw new Exception("negative position accepted");
     if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Sr = 0 } : p), out _, out _)) throw new Exception("nonpositive SR accepted");
     if (RankedPlayersApiClient.TryValidatePlayers(rows.Select((p, i) => i == 5 ? p with { Name = " " } : p), out _, out _)) throw new Exception("empty name accepted");
-    if (RankedPlayersApiClient.TryValidatePlayers(rows.Take(249), out _, out _) || RankedPlayersApiClient.TryValidatePlayers(rows.Append(new RankedPlayer(250, 1, "extra")), out _, out _)) throw new Exception("invalid player count accepted");
+    var partialRows = rows.Take(7).ToArray();
+    if (!RankedPlayersApiClient.TryValidatePlayers(partialRows, out var validatedPartial, out _) || validatedPartial.Count != 7) throw new Exception("valid partial native leaderboard rejected");
+    var partialOrdinalPayload = RankedPlayersApiClient.MapToApiOrdinalPositions(validatedPartial);
+    if (!RankedPlayersApiClient.TryValidateApiRequestPlayers(partialOrdinalPayload, out _, out _) || !partialOrdinalPayload.Select(player => player.Position).SequenceEqual(Enumerable.Range(1, 7))) throw new Exception("partial ordinal API payload rejected");
+    if (RankedPlayersApiClient.TryValidatePlayers(Array.Empty<RankedPlayer>(), out _, out _) || RankedPlayersApiClient.TryValidatePlayers(rows.Append(new RankedPlayer(251, 1, "extra")), out _, out _)) throw new Exception("invalid player count accepted");
     var handler = new RecordingHandler([HttpStatusCode.InternalServerError, HttpStatusCode.OK]);
     using var client = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, handler);
     var result = await client.SyncAsync("mp", rows, CancellationToken.None);
@@ -398,6 +512,17 @@ static async Task ApiSyncTests(AppLogger log)
     using var tiedClient = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, tiedHandler);
     if ((await tiedClient.SyncAsync("resurgence", tiesB, CancellationToken.None)).State != ApiSyncState.Ok) throw new Exception("tied ranking did not reach API client");
     AssertOrdinalApiPayload(tiedHandler.Body);
+    var partialHandler = new RecordingHandler([HttpStatusCode.OK]);
+    using var partialClient = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, partialHandler);
+    if ((await partialClient.SyncAsync("mp", partialRows, CancellationToken.None)).State != ApiSyncState.Ok || partialHandler.Calls != 1) throw new Exception("partial leaderboard did not reach API client");
+    AssertOrdinalApiPayload(partialHandler.Body, 7);
+    var emptyHandler = new RecordingHandler([HttpStatusCode.OK]);
+    using var emptyClient = new RankedPlayersApiClient(new StaticTokenProvider("synthetic-token"), log, emptyHandler);
+    var emptyResult = await emptyClient.SyncAsync("br", Array.Empty<RankedPlayer>(), CancellationToken.None);
+    if (emptyResult.State != ApiSyncState.Skipped || emptyResult.Reason != "empty-leaderboard" || emptyHandler.Calls != 0) throw new Exception("empty leaderboard performed API sync");
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var mainWindow = File.ReadAllText(Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "MainWindow.xaml.cs"));
+    if (!mainWindow.Contains("No Top 250 players yet", StringComparison.Ordinal) || !mainWindow.Contains("No sync required", StringComparison.Ordinal)) throw new Exception("empty leaderboard UI contract");
     var runtimeFirst = new CompositeApiTokenProvider(new StaticTokenProvider("runtime-token"), new StaticTokenProvider("embedded-token"));
     var embeddedFallback = new CompositeApiTokenProvider(new StaticTokenProvider(" "), new StaticTokenProvider("embedded-token"));
     if (runtimeFirst.GetToken() != "runtime-token" || embeddedFallback.GetToken() != "embedded-token") throw new Exception("token provider priority");
@@ -416,6 +541,27 @@ static async Task ApiSyncTests(AppLogger log)
     if ((await failedClient.SyncAsync("mp", rows, CancellationToken.None)).State != ApiSyncState.Failed) throw new Exception("network failure state");
     var appLog = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
     if (!appLog.Contains("API_SYNC_FAILED", StringComparison.Ordinal) || !appLog.Contains("innerSocketError=ConnectionRefused", StringComparison.Ordinal) || appLog.Contains("synthetic-token", StringComparison.OrdinalIgnoreCase)) throw new Exception("API failure diagnostics logging");
+}
+
+static async Task LiveApiSyncFromStandardInput()
+{
+    var input = await Console.In.ReadToEndAsync();
+    using var document = JsonDocument.Parse(input);
+    if (!document.RootElement.TryGetProperty("datasets", out var datasets)) throw new InvalidDataException("LIVE_API_DATASETS_MISSING");
+    var providerType = typeof(CODMunityTop250Collector.App.App).Assembly.GetType("CODMunityTop250Collector.App.EmbeddedRankedSyncTokenProvider", throwOnError: false);
+    if (providerType is null || Activator.CreateInstance(providerType, nonPublic: true) is not IApiTokenProvider provider) throw new InvalidOperationException("LIVE_API_EMBEDDED_PROVIDER_UNAVAILABLE");
+    var log = new AppLogger();
+    using var client = new RankedPlayersApiClient(provider, log);
+    foreach (var mode in new[] { "resurgence", "mp", "br" })
+    {
+        if (!datasets.TryGetProperty(mode, out var dataset) || !string.Equals(dataset.GetProperty("status").GetString(), "OK", StringComparison.Ordinal)) throw new InvalidDataException($"LIVE_API_DATASET_NOT_READY mode={mode}");
+        var rows = dataset.GetProperty("players").EnumerateArray().Select(player => new RankedPlayer(
+            player.GetProperty("position").GetInt32(), player.GetProperty("sr").GetInt32(), player.GetProperty("name").GetString() ?? string.Empty)).ToArray();
+        var sync = await client.SyncAsync(mode, rows, CancellationToken.None);
+        Console.WriteLine($"LIVE_API_SYNC mode={mode} rows={rows.Length} state={sync.State} status={sync.StatusCode?.ToString() ?? "none"}");
+        if (rows.Length > 0 && sync.State != ApiSyncState.Ok) throw new InvalidOperationException($"LIVE_API_SYNC_FAILED mode={mode} state={sync.State}");
+        if (rows.Length == 0 && sync.State != ApiSyncState.Skipped) throw new InvalidOperationException($"LIVE_API_EMPTY_NOT_SKIPPED mode={mode} state={sync.State}");
+    }
 }
 
 static async Task BuildIdentityCacheTests(AppLogger log)
@@ -501,6 +647,7 @@ static void EngineManagedIdentityContractTests()
     var engine = Path.Combine(AppContext.BaseDirectory, "engine");
     var orchestrator = File.ReadAllText(Path.Combine(engine, "top250_orchestrator.ps1"));
     if (!orchestrator.Contains("-VerifiedBuildSha256", StringComparison.Ordinal) || !orchestrator.Contains("ProcessPriorityClass]::BelowNormal", StringComparison.Ordinal)) throw new Exception("managed engine identity or exporter priority contract");
+    if (!orchestrator.Contains("Get-OrchestratorSha256Hex", StringComparison.Ordinal) || orchestrator.Contains("[Security.Cryptography.SHA256]::HashData", StringComparison.Ordinal)) throw new Exception("orchestrator PowerShell 5 SHA-256 compatibility contract");
     var layouts = JsonDocument.Parse(File.ReadAllText(Path.Combine(engine, "build_layouts.json")));
     var season5 = layouts.RootElement.GetProperty("sha256Builds").GetProperty("97413B95AA94A9694690BA70B16189E4827E2B363850F873387E8A88101D4FE4");
     if (season5.GetProperty("layout").GetString() != "bnet-20260820" || season5.GetProperty("exporterSet").GetString() != "bnet-dynamic" || !orchestrator.Contains("$Manifest.battlenetLayoutDefinitions", StringComparison.Ordinal)) throw new Exception("static Battle.net layout must route through dynamic exporter");
@@ -555,12 +702,12 @@ static async Task SchedulerApiPriorityTests(AppLogger log)
     }
 }
 
-static void AssertOrdinalApiPayload(string? body)
+static void AssertOrdinalApiPayload(string? body, int expectedRows = 250)
 {
     using var json = JsonDocument.Parse(body ?? throw new Exception("missing API payload"));
     var players = json.RootElement.GetProperty("players");
-    if (players.GetArrayLength() != 250) throw new Exception("API payload player count");
-    for (var index = 0; index < 250; index++)
+    if (players.GetArrayLength() != expectedRows) throw new Exception("API payload player count");
+    for (var index = 0; index < expectedRows; index++)
     {
         var player = players[index];
         if (player.GetProperty("position").GetInt32() != index + 1) throw new Exception("API payload position is not ordinal");

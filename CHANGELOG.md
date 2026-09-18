@@ -4,6 +4,8 @@
 
 - Add fail-closed Battle.net layout autodiscovery framework with exact-SHA cache revalidation and deterministic multi-anchor requirements.
 - Prevent Watcher restart loops when a build/layout is explicitly unsupported.
+- Restore Battle.net Season 06 Top 250 collection through the validated `bnet-20260918` layout.
+- Support progressively populated Top 250 datasets: sync 1–250 validated rows, and treat zero rows as a valid no-sync state.
 
 ## 0.1.23-alpha
 

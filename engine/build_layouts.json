@@ -15,6 +15,11 @@
       "layout": "bnet-20260820",
       "exporterSet": "bnet-dynamic"
     },
+    "DA8DE033EFE34B77DA0D6014EFFA9C551C0E30A3CFB4A3B39A52D6B86AD03A09": {
+      "platform": "battlenet",
+      "layout": "bnet-20260918",
+      "exporterSet": "bnet-dynamic"
+    },
     "0D40348074F8CAFBDF3F76BFBBC5193BF7E4A31146F7225EFF5C7706436239D9": {
       "platform": "steam",
       "layout": "steam-current",
@@ -33,6 +38,14 @@
     "methods": []
   },
   "battlenetLayoutDefinitions": {
+    "bnet-20260918": {
+      "priority": 4,
+      "datasets": {
+        "mp": { "stateRva": "0x12BDED10", "countRva": "0x12C1A45C", "entry0Rva": "0x12C1A460" },
+        "br": { "stateRva": "0x12C60E00", "countRva": "0x12C9C54C", "entry0Rva": "0x12C9C550" },
+        "resurgence": { "stateRva": "0x12CE2EF0", "countRva": "0x12D1E63C", "entry0Rva": "0x12D1E640" }
+      }
+    },
     "bnet-20260820": {
       "priority": 3,
       "datasets": {

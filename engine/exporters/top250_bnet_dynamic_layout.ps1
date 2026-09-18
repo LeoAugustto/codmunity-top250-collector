@@ -20,7 +20,7 @@ if ([string]::IsNullOrWhiteSpace($Mode) -or [string]::IsNullOrWhiteSpace($Expect
 }
 
 $RecordStride = 0x458
-$MaxRecords   = 260
+$MaxRecords   = 250
 
 $EntityIdOffset   = 0x00
 $NativeRank0Offset = 0x08
@@ -165,7 +165,7 @@ try {
         exit 23
     }
 
-    if ($nativeCount -lt 1 -or $nativeCount -gt $MaxRecords) {
+    if ($nativeCount -gt $MaxRecords) {
         Say "INVALID_COUNT count=$nativeCount" Red
         exit 24
     }
@@ -205,8 +205,11 @@ try {
         $previousSr = $sr
     }
 
-    if ($rows.Count -lt 1 -or $rows.Count -gt 260) {
-        Say "INVALID_EXPORTED_COUNT count=$($rows.Count)" Red
+    if ($nativeCount -eq 0) {
+        Say "EMPTY_LEADERBOARD nativeCount=0" Yellow
+    }
+    elseif ($rows.Count -ne [int]$nativeCount) {
+        Say "INVALID_EXPORTED_COUNT expected=$nativeCount actual=$($rows.Count)" Red
         exit 25
     }
 

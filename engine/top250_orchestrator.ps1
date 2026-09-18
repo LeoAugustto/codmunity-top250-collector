@@ -327,6 +327,13 @@ function Get-LastWriteUtc {
     return $null
 }
 
+function Get-OrchestratorSha256Hex {
+    param([byte[]]$Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '') }
+    finally { $algorithm.Dispose() }
+}
+
 function Test-ExporterPayload {
     param([object]$json, [string]$ExpectedMode, [DateTime]$StartedAt, [object]$Identity)
     if ($json.mode -ne $ExpectedMode) { return [ordered]@{ Status = 'FAILED'; Reason = 'MODE_MISMATCH' } }
@@ -340,8 +347,9 @@ function Test-ExporterPayload {
     }
     try { $capturedAt = [DateTime]::Parse([string]$json.capturedAt).ToUniversalTime() } catch { return [ordered]@{ Status = 'FAILED'; Reason = 'CAPTURED_AT_INVALID' } }
     if ($capturedAt -lt $StartedAt.AddSeconds(-1)) { return [ordered]@{ Status = 'FAILED'; Reason = 'CAPTURED_AT_STALE' } }
-    if (($json.nativeCount -lt 1) -or ($json.nativeCount -gt 260)) { return [ordered]@{ Status = 'FAILED'; Reason = 'NATIVE_COUNT_INVALID' } }
-    if (($json.rowCount -lt 1) -or ($json.rowCount -gt 260)) { return [ordered]@{ Status = 'FAILED'; Reason = 'ROW_COUNT_INVALID' } }
+    if (($json.nativeCount -lt 0) -or ($json.nativeCount -gt 250)) { return [ordered]@{ Status = 'FAILED'; Reason = 'NATIVE_COUNT_INVALID' } }
+    if (($json.rowCount -lt 0) -or ($json.rowCount -gt 250)) { return [ordered]@{ Status = 'FAILED'; Reason = 'ROW_COUNT_INVALID' } }
+    if ([int]$json.nativeCount -ne [int]$json.rowCount) { return [ordered]@{ Status = 'FAILED'; Reason = 'NATIVE_ROW_COUNT_MISMATCH' } }
     if ($null -eq $json.players) { return [ordered]@{ Status = 'FAILED'; Reason = 'PLAYERS_MISSING' } }
     $players = @($json.players)
     if ($players.Count -ne [int]$json.rowCount) { return [ordered]@{ Status = 'FAILED'; Reason = 'ROW_COUNT_MISMATCH' } }
@@ -355,7 +363,7 @@ function Test-ExporterPayload {
         if ($previousSr -ne $null) { if ($sr -gt $previousSr) { return [ordered]@{ Status = 'FAILED'; Reason = 'SR_ORDER_INVALID' } }; if (($sr -eq $previousSr -and $position -ne $previousPosition) -or ($sr -lt $previousSr -and $position -ne $ordinal)) { return [ordered]@{ Status = 'FAILED'; Reason = 'RANK_SEQUENCE_INVALID' } } }
         $previousPosition = $position; $previousSr = $sr; $fingerprintRows.Add(($xuid + '|' + $position + '|' + $sr))
     }
-    $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes(($fingerprintRows -join "`n")); $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($fingerprintBytes))
+    $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes(($fingerprintRows -join "`n")); $fingerprint = Get-OrchestratorSha256Hex $fingerprintBytes
     $safePlayers = @($players | ForEach-Object { [ordered]@{ position = [int]$_.position; sr = [int]$_.sr; name = [string]$_.name } })
     return [ordered]@{ Status = 'OK'; Rows = [int]$json.rowCount; CapturedAt = $capturedAt.ToString('o'); NativeCount = [int]$json.nativeCount; Players = $safePlayers; Fingerprint = $fingerprint }
 }
@@ -418,7 +426,7 @@ function Invoke-BnetValidationSample {
     param([string]$CodPath, [object]$Identity, [object]$Definition)
     $layout = New-DynamicBnetLayout -Definition $Definition
     $results = @(); foreach ($dataset in @(Get-Datasets -Layout $layout)) { $results += Invoke-Exporter -Dataset $dataset -ExpectedCodPath $CodPath -ExporterSet $layout.exporterSet -Identity $Identity }
-    $passed = ($results.Count -eq 3) -and (@($results | Where-Object { $_.Status -ne 'OK' -or $_.Rows -ne 250 -or $_.NativeCount -ne 250 -or [string]::IsNullOrWhiteSpace([string]$_.Fingerprint) }).Count -eq 0)
+    $passed = ($results.Count -eq 3) -and (@($results | Where-Object { $_.Status -ne 'OK' -or $_.Rows -lt 0 -or $_.Rows -gt 250 -or $_.Rows -ne $_.NativeCount -or [string]::IsNullOrWhiteSpace([string]$_.Fingerprint) }).Count -eq 0)
     return [pscustomobject]@{ Passed = $passed; Layout = $layout; Results = $results }
 }
 
@@ -501,7 +509,8 @@ function Invoke-CollectionCycle {
     foreach ($dataset in $Datasets) {
         $result = Invoke-Exporter -Dataset $dataset -ExpectedCodPath $CodPath -ExporterSet $Layout.exporterSet -Identity $Identity
         $results[$dataset.Key] = $result
-        if ($result.Status -eq "OK") { Write-Log ("{0} OK rows={1} nativeCount={2} durationMs={3}" -f $dataset.Label, $result.Rows, $result.NativeCount, $result.DurationMs) }
+        if ($result.Status -eq "OK" -and $result.NativeCount -eq 0) { Write-Log ("{0} EMPTY nativeCount=0 durationMs={1}" -f $dataset.Label, $result.DurationMs) }
+        elseif ($result.Status -eq "OK") { Write-Log ("{0} OK rows={1} nativeCount={2} durationMs={3}" -f $dataset.Label, $result.Rows, $result.NativeCount, $result.DurationMs) }
         elseif ($result.Status -eq "NOT_READY") { Write-Log ("{0} NOT_READY reason={1} exitCode={2} durationMs={3}" -f $dataset.Label, $result.Reason, $result.ExitCode, $result.DurationMs) }
         else { Write-Log ("{0} FAILED reason={1} exitCode={2} durationMs={3}" -f $dataset.Label, $result.Reason, $result.ExitCode, $result.DurationMs) }
     }
