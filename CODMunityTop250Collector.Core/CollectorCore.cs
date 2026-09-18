@@ -65,14 +65,14 @@ public sealed class AppLogger
 }
 
 public sealed record DatasetStatus(string Status = "WAITING", int? Players = null, DateTimeOffset? CapturedAt = null, long? DurationMs = null, string? Reason = null, IReadOnlyList<RankedPlayer>? PlayerRows = null, ApiSyncState ApiSync = ApiSyncState.NotConfigured);
-public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null, string? BuildIdentity = null, DateTimeOffset? CycleStartedAt = null);
+public sealed record CollectorSnapshot(bool Enabled, string Game = "Closed", string Platform = "Unknown", string Build = "Unknown", string? Layout = null, DateTimeOffset? LastSuccess = null, DateTimeOffset? NextCollection = null, string CycleStatus = "COD_NOT_RUNNING", string? Error = null, DatasetStatus? Mp = null, DatasetStatus? Br = null, DatasetStatus? Resurgence = null, string? BuildIdentity = null, DateTimeOffset? CycleStartedAt = null, string LayoutDiscoveryStatus = "resolved");
 
 public static class CollectorSupportInfo
 {
     public static string Format(CollectorSnapshot snapshot, string collectorVersion, string runtimeVersion, string frameworkDescription, string osDescription, string processArchitecture) =>
         string.Join(Environment.NewLine,
             $"collectorVersion={collectorVersion}", $"runtimeVersion={runtimeVersion}", $"frameworkDescription={frameworkDescription}", $"osDescription={osDescription}", $"processArchitecture={processArchitecture}",
-            $"platform={snapshot.Platform}", $"gameBuildIdentity={snapshot.BuildIdentity ?? "unknown"}", $"layout={snapshot.Layout ?? "unknown"}",
+            $"platform={snapshot.Platform}", $"gameBuildIdentity={snapshot.BuildIdentity ?? "unknown"}", $"layout={snapshot.Layout ?? "unknown"}", $"layoutDiscoveryStatus={snapshot.LayoutDiscoveryStatus}",
             $"lastCollectionResult={snapshot.CycleStatus}", $"lastApiSyncResult=resurgence:{snapshot.Resurgence?.ApiSync ?? ApiSyncState.NotConfigured},mp:{snapshot.Mp?.ApiSync ?? ApiSyncState.NotConfigured},br:{snapshot.Br?.ApiSync ?? ApiSyncState.NotConfigured}");
 }
 
@@ -95,7 +95,31 @@ public sealed class EngineStatusParser
             }
             return new DatasetStatus(GetString(value, "status") ?? "WAITING", GetInt(value, "rows"), ParseDate(value, "capturedAt"), GetLong(value, "durationMs"), GetString(value, "reason"), players);
         }
-        return new CollectorSnapshot(enabled, "Running", GetString(root, "platform") ?? "Unknown", string.Equals(GetString(root, "cycleStatus"), "UNSUPPORTED_BUILD", StringComparison.Ordinal) ? "Unsupported" : "Supported", GetString(root, "layout"), null, null, GetString(root, "cycleStatus") ?? "FAILED", null, Dataset("mp"), Dataset("br"), Dataset("resurgence"), GetString(root, "codSha256") ?? GetString(root, "runtimeBuildId"));
+        var cycleStatus = GetString(root, "cycleStatus") ?? "FAILED";
+        var inferredDiscoveryStatus = cycleStatus switch
+        {
+            "UNSUPPORTED_BUILD" => "pending",
+            "LAYOUT_DISCOVERY_AMBIGUOUS" => "ambiguous",
+            "LAYOUT_DISCOVERY_FAILED" => "unsupported",
+            _ => "resolved"
+        };
+        var discoveryStatus = GetString(root, "layoutDiscoveryStatus") switch
+        {
+            "pending" => "pending",
+            "unsupported" => "unsupported",
+            "ambiguous" => "ambiguous",
+            "resolved" => "resolved",
+            null => inferredDiscoveryStatus,
+            _ => "unsupported"
+        };
+        var build = discoveryStatus switch
+        {
+            "pending" => "LayoutDiscoveryPending",
+            "ambiguous" => "LayoutAmbiguous",
+            "unsupported" => "LayoutUnsupported",
+            _ => "Supported"
+        };
+        return new CollectorSnapshot(enabled, "Running", GetString(root, "platform") ?? "Unknown", build, GetString(root, "layout"), null, null, cycleStatus, null, Dataset("mp"), Dataset("br"), Dataset("resurgence"), GetString(root, "codSha256") ?? GetString(root, "runtimeBuildId"), null, discoveryStatus);
     }
     public string CopyBuildInfo(string json, string version)
     {

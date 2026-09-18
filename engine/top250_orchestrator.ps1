@@ -444,11 +444,12 @@ function Invoke-BnetLayoutValidation {
 function Resolve-UnknownBnetLayout {
     param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Manifest)
     $sha = [string]$Identity.Value
+    $script:LastLayoutDiscoveryStatus = 'unsupported'
     $cached = Read-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha
     if ($cached.Status -eq 'OK') {
         Write-Log "LAYOUT_CACHE_LOADED sha=$sha"
         $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $cached.Definition
-        if ($validation.Passed) { Write-Log "LAYOUT_VALIDATION_OK source=cache"; return $validation.Layout }
+        if ($validation.Passed) { $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=cache"; return $validation.Layout }
         Write-Log "LAYOUT_CACHE_REJECTED reason=$($validation.Reason)"
     }
     elseif ($cached.Status -eq 'REJECTED') { Write-Log "LAYOUT_CACHE_REJECTED reason=$($cached.Reason)" }
@@ -456,19 +457,19 @@ function Resolve-UnknownBnetLayout {
     Write-Log "LAYOUT_DISCOVERY_START"
     $discovery = Get-BnetStaticDiscoveryCandidates -CodPath $CodPath -Sha256 $sha -Catalog $Manifest.battlenetDiscovery
     $decision = Select-BnetDiscoveryCandidate -Candidates $discovery.Candidates
-    if ($decision.Status -eq 'AMBIGUOUS') { Write-Log "LAYOUT_DISCOVERY_AMBIGUOUS candidates=$($decision.Count)"; return $null }
-    if ($decision.Status -ne 'SINGLE') { Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)"; return $null }
+    if ($decision.Status -eq 'AMBIGUOUS') { $script:LastLayoutDiscoveryStatus = 'ambiguous'; Write-Log "LAYOUT_DISCOVERY_AMBIGUOUS candidates=$($decision.Count)"; return $null }
+    if ($decision.Status -ne 'SINGLE') { if ($discovery.Reason -eq 'NO_TRUSTED_SIGNATURE_METHODS') { $script:LastLayoutDiscoveryStatus = 'pending' }; Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)"; return $null }
     Write-Log "LAYOUT_CANDIDATE_FOUND method=$($decision.MethodVersion)"
 
     $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $decision.Candidate
     if (-not $validation.Passed) { Write-Log "LAYOUT_VALIDATION_FAILED reason=$($validation.Reason)"; Write-Log "LAYOUT_DISCOVERY_FAILED reason=RUNTIME_VALIDATION_FAILED"; return $null }
     [void](Write-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha -Definition $decision.Candidate -MethodVersion $decision.MethodVersion)
-    Write-Log "LAYOUT_VALIDATION_OK source=static-anchors"
+    $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=static-anchors"
     Write-Log "LAYOUT_DISCOVERY_OK layoutId=$($decision.Candidate.name) sha=$sha"
     return $validation.Layout
 }
 function Write-Status {
-    param([int]$CodPid, [string]$CodPath, [string]$CodSha256, [string]$RuntimeBuildId, [string]$Platform, [string]$Layout, [string]$CycleStatus, [object[]]$Datasets, [hashtable]$Results)
+    param([int]$CodPid, [string]$CodPath, [string]$CodSha256, [string]$RuntimeBuildId, [string]$Platform, [string]$Layout, [string]$CycleStatus, [object[]]$Datasets, [hashtable]$Results, [string]$LayoutDiscoveryStatus = 'resolved')
     $datasetStatuses = [ordered]@{}
     foreach ($dataset in $Datasets) {
         $result = $Results[$dataset.Key]
@@ -480,17 +481,17 @@ function Write-Status {
     }
     $status = [ordered]@{
         capturedAt = [DateTime]::UtcNow.ToString("o"); codPid = $CodPid; codPath = $CodPath; codSha256 = $CodSha256; runtimeBuildId = $RuntimeBuildId
-        platform = $Platform; layout = $Layout; cycleStatus = $CycleStatus; datasets = $datasetStatuses
+        platform = $Platform; layout = $Layout; layoutDiscoveryStatus = $LayoutDiscoveryStatus; cycleStatus = $CycleStatus; datasets = $datasetStatuses
     }
     if ($EmitJson) { [Console]::Out.WriteLine(($status | ConvertTo-Json -Depth 7 -Compress)) }
 }
 
 function Write-IdentityStatus {
-    param([int]$CodPid, [string]$CodPath, [object]$Identity, [string]$CycleStatus)
+    param([int]$CodPid, [string]$CodPath, [object]$Identity, [string]$CycleStatus, [string]$LayoutDiscoveryStatus = 'unsupported')
     $sha = if ($Identity.Type -eq "sha256") { [string]$Identity.Value } else { $null }
     $runtime = if ($Identity.Type -eq "runtimeBuildId") { [string]$Identity.Value } else { $null }
     $platform = if ($Identity.PlatformHint) { $Identity.PlatformHint } else { "unknown" }
-    Write-Status -CodPid $CodPid -CodPath $CodPath -CodSha256 $sha -RuntimeBuildId $runtime -Platform $platform -Layout "unknown" -CycleStatus $CycleStatus -Datasets @() -Results @{}
+    Write-Status -CodPid $CodPid -CodPath $CodPath -CodSha256 $sha -RuntimeBuildId $runtime -Platform $platform -Layout "unknown" -CycleStatus $CycleStatus -Datasets @() -Results @{} -LayoutDiscoveryStatus $LayoutDiscoveryStatus
 }
 
 function Invoke-CollectionCycle {
@@ -549,7 +550,7 @@ while ($true) {
         if ($activeIdentity.Type -eq "unavailable") {
             Write-Log ('COD_DETECTED pid={0} codPath="{1}" platform={2} buildIdentityUnavailable reason="{3}" osVersion="{4}" powerShellVersion={5}' -f $cod.Id, $codPath, $activeIdentity.PlatformHint, $activeIdentity.Error, [Environment]::OSVersion.VersionString, $PSVersionTable.PSVersion)
             Write-Log ("BUILD_ID_UNAVAILABLE codPath=`"{0}`" reason=`"{1}`"" -f $codPath, $activeIdentity.Error)
-            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus "BUILD_ID_UNAVAILABLE"
+            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus "BUILD_ID_UNAVAILABLE" -LayoutDiscoveryStatus 'unsupported'
             if ($Once) { exit 3 }
             Start-Sleep -Seconds 5; continue
         }
@@ -570,7 +571,7 @@ while ($true) {
         Write-Log ('COD_DETECTED pid={0} codPath="{1}" {2} platform={3} layout={4} osVersion="{5}" powerShellVersion={6} initialDelaySeconds={7}' -f $cod.Id, $codPath, $identityLog, $platform, $layoutName, [Environment]::OSVersion.VersionString, $PSVersionTable.PSVersion, $InitialDelaySeconds)
         if ($null -eq $activeLayout) {
             Write-Log ("UNSUPPORTED_BUILD codPath=`"{0}`" {1}" -f $codPath, $identityLog)
-            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus "UNSUPPORTED_BUILD"
+            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus "UNSUPPORTED_BUILD" -LayoutDiscoveryStatus $script:LastLayoutDiscoveryStatus
             if ($Once) { exit 2 }
             Start-Sleep -Seconds 5; continue
         }

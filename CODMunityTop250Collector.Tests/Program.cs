@@ -26,7 +26,8 @@ try
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
     var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.24-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.24-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    if (!supportInfo.Contains("collectorVersion=0.1.24-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("layoutDiscoveryStatus=resolved", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    LayoutDiscoveryUiStateTests(parser);
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
     var ptBr = CultureInfo.GetCultureInfo("pt-BR");
@@ -211,11 +212,32 @@ static async Task StationWatcherTests()
     }
     if (crashPlatform.CloseCalls != 3 || crashPlatform.LaunchCalls != 0 || crashWatcher.Snapshot.State != StationWatcherState.CrashLoopBackoff) throw new Exception("kill failure proceeded to Battle.net or skipped crash-loop backoff");
 
-    var unsupportedPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(801, now.AddMinutes(-30)), InternetAvailable = true };
-    var unsupportedSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: "UNSUPPORTED_BUILD");
-    var unsupportedWatcher = new StationWatcher(() => settings, () => unsupportedSnapshot, unsupportedPlatform, (_, _) => { }, () => now, config);
-    await unsupportedWatcher.EvaluateOnceAsync(CancellationToken.None);
-    if (unsupportedWatcher.Snapshot.State != StationWatcherState.LayoutUnsupported || unsupportedPlatform.CloseCalls != 0 || unsupportedPlatform.LaunchCalls != 0) throw new Exception("unsupported build caused Watcher recovery");
+    foreach (var unresolvedCycleStatus in new[] { "UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_FAILED", "LAYOUT_DISCOVERY_AMBIGUOUS" })
+    {
+        var unsupportedPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(801, now.AddMinutes(-30)), InternetAvailable = true };
+        var unsupportedSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: unresolvedCycleStatus);
+        var unsupportedWatcher = new StationWatcher(() => settings, () => unsupportedSnapshot, unsupportedPlatform, (_, _) => { }, () => now, config);
+        await unsupportedWatcher.EvaluateOnceAsync(CancellationToken.None);
+        if (unsupportedWatcher.Snapshot.State != StationWatcherState.LayoutUnsupported || unsupportedPlatform.CloseCalls != 0 || unsupportedPlatform.LaunchCalls != 0) throw new Exception("unresolved layout caused Watcher recovery: " + unresolvedCycleStatus);
+    }
+}
+static void LayoutDiscoveryUiStateTests(EngineStatusParser parser)
+{
+    const string status = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"battlenet\",\"codSha256\":\"new-build\",\"layout\":\"unknown\",\"cycleStatus\":\"UNSUPPORTED_BUILD\",\"datasets\":{}}";
+    var started = DateTimeOffset.Parse("2025-12-31T23:59:59Z");
+    var pending = parser.Parse(status, true, started);
+    if (pending.Build != "LayoutDiscoveryPending" || pending.LayoutDiscoveryStatus != "pending") throw new Exception("unknown build discovery pending state");
+    var failed = parser.Parse(status.Replace("UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_FAILED", StringComparison.Ordinal), true, started);
+    if (failed.Build != "LayoutUnsupported" || failed.LayoutDiscoveryStatus != "unsupported") throw new Exception("discovery failed state");
+    var ambiguous = parser.Parse(status.Replace("UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_AMBIGUOUS", StringComparison.Ordinal), true, started);
+    if (ambiguous.Build != "LayoutAmbiguous" || ambiguous.LayoutDiscoveryStatus != "ambiguous") throw new Exception("discovery ambiguous state");
+    var malformed = parser.Parse(status.Replace("\"cycleStatus\":\"UNSUPPORTED_BUILD\"", "\"layoutDiscoveryStatus\":\"unexpected\",\"cycleStatus\":\"WAITING_FOR_CACHE\"", StringComparison.Ordinal), true, started);
+    if (malformed.Build != "LayoutUnsupported" || malformed.LayoutDiscoveryStatus != "unsupported") throw new Exception("malformed discovery status did not fail closed");
+    var resolved = parser.Parse(status.Replace("\"layout\":\"unknown\",\"cycleStatus\":\"UNSUPPORTED_BUILD\"", "\"layout\":\"bnet-autodiscovered\",\"layoutDiscoveryStatus\":\"resolved\",\"cycleStatus\":\"WAITING_FOR_CACHE\"", StringComparison.Ordinal), true, started);
+    if (resolved.Build != "Supported" || resolved.LayoutDiscoveryStatus != "resolved") throw new Exception("resolved discovered layout state");
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var windowSource = File.ReadAllText(Path.Combine(repositoryRoot, "CODMunityTop250Collector.App", "MainWindow.xaml.cs"));
+    if (!windowSource.Contains("New game build detected", StringComparison.Ordinal) || !windowSource.Contains("Waiting for layout discovery.", StringComparison.Ordinal) || !windowSource.Contains("Collection will resume automatically when the layout is validated.", StringComparison.Ordinal)) throw new Exception("layout discovery pending UI copy");
 }
 static void LayoutDiscoveryContractTests()
 {

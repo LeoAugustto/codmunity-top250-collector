@@ -67,18 +67,25 @@ public partial class MainWindow : Window
     {
         currentSnapshot = snapshot;
         var isSyncing = snapshot.CycleStatus == "RUNNING";
-        var unsupported = snapshot.Build == "Unsupported" || snapshot.CycleStatus is "UNSUPPORTED_BUILD" or "BUILD_ID_UNAVAILABLE";
+        var layoutPending = snapshot.LayoutDiscoveryStatus == "pending" || snapshot.Build == "LayoutDiscoveryPending";
+        var layoutAmbiguous = snapshot.LayoutDiscoveryStatus == "ambiguous" || snapshot.Build == "LayoutAmbiguous";
+        var layoutUnsupported = snapshot.LayoutDiscoveryStatus == "unsupported" || snapshot.Build == "LayoutUnsupported" || snapshot.CycleStatus == "BUILD_ID_UNAVAILABLE";
+        var unresolvedLayout = layoutPending || layoutAmbiguous || layoutUnsupported;
         var failed = snapshot.CycleStatus is "FAILED" or "PARTIAL_FAILURE" || !string.IsNullOrWhiteSpace(snapshot.Error);
         var waitingForData = snapshot.CycleStatus is "WAITING_FOR_CACHE" or "WAITING_FOR_GAME";
         var gameRunning = snapshot.Game == "Running";
 
-        PlatformPill.Visibility = gameRunning && !unsupported ? Visibility.Visible : Visibility.Collapsed;
+        PlatformPill.Visibility = gameRunning && !unresolvedLayout ? Visibility.Visible : Visibility.Collapsed;
         PlatformPillText.Text = FriendlyPlatform(snapshot.Platform);
 
         if (!snapshot.Enabled)
             SetPrimaryStatus("Collector disabled", "Turn it back on in Settings to resume automatic collection.", (MediaBrush)FindResource("Gray"));
-        else if (unsupported)
-            SetPrimaryStatus("Unsupported game build", "Collector update required for this game build.", (MediaBrush)FindResource("Yellow"));
+        else if (layoutPending)
+            SetPrimaryStatus("New game build detected", "Waiting for layout discovery. Collection will resume automatically when the layout is validated.", (MediaBrush)FindResource("Yellow"));
+        else if (layoutAmbiguous)
+            SetPrimaryStatus("Layout discovery ambiguous", "Collection is paused until the game layout can be validated safely.", (MediaBrush)FindResource("Yellow"));
+        else if (layoutUnsupported)
+            SetPrimaryStatus("Unsupported game build", "Layout discovery could not validate this game build safely.", (MediaBrush)FindResource("Yellow"));
         else if (failed)
             SetPrimaryStatus("Collection failed", "The collector will try again on the next scheduled sync.", (MediaBrush)FindResource("Red"));
         else if (!gameRunning)
@@ -96,8 +103,8 @@ public partial class MainWindow : Window
         if (hasLastSync) TimingInlineText.Text = $"Last sync {FormatTime(snapshot.LastSuccess!.Value)}";
         RefreshNextSync();
         SyncButton.Content = isSyncing ? "Syncing..." : "Sync now";
-        SyncButton.IsEnabled = snapshot.Enabled && gameRunning && !isSyncing;
-        CopyBuildButton.Visibility = unsupported ? Visibility.Visible : Visibility.Collapsed;
+        SyncButton.IsEnabled = snapshot.Enabled && gameRunning && !isSyncing && !unresolvedLayout;
+        CopyBuildButton.Visibility = unresolvedLayout ? Visibility.Visible : Visibility.Collapsed;
 
         SetDataset(MpPlayers, MpStatus, MpApiStatus, MpDot, snapshot.Mp, snapshot.Enabled, gameRunning);
         SetDataset(BrPlayers, BrStatus, BrApiStatus, BrDot, snapshot.Br, snapshot.Enabled, gameRunning);
