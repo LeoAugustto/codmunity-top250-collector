@@ -42,6 +42,7 @@ try
     LayoutDiscoveryContractTests();
     LayoutEvidenceCaptureContractTests();
     LiveEvidenceCaptureContractTests();
+    LiveRowEvidenceCaptureContractTests();
     InstallerLaunchContractTests();
     ReleaseSigningTests(root);
     PrivateUpdaterTests(root);
@@ -295,6 +296,19 @@ static void LiveEvidenceCaptureContractTests()
         capture.Contains("WriteProcessMemory", StringComparison.Ordinal) || capture.Contains("CreateRemoteThread", StringComparison.Ordinal) ||
         capture.Contains("VirtualProtectEx", StringComparison.Ordinal) || capture.Contains("Process.Start", StringComparison.Ordinal))
         throw new Exception("live evidence capture read-only safety contract");
+}
+static void LiveRowEvidenceCaptureContractTests()
+{
+    var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var capturePath = Path.Combine(repositoryRoot, "tools", "capture-live-row-evidence.ps1");
+    var capture = File.ReadAllText(capturePath);
+    if (!capture.Contains("FirstVisibleName", StringComparison.Ordinal) || !capture.Contains("SecondVisibleName", StringComparison.Ordinal) ||
+        !capture.Contains("PROCESS_VM_READ", StringComparison.Ordinal) || !capture.Contains("playerNamesStored = $false", StringComparison.Ordinal) ||
+        !capture.Contains("playerXuidsStored = $false", StringComparison.Ordinal) || !capture.Contains("playerRecordBytesStored = $false", StringComparison.Ordinal) ||
+        !capture.Contains("PointerHitLimitReached", StringComparison.Ordinal) || capture.Contains("WriteProcessMemory", StringComparison.Ordinal) ||
+        capture.Contains("CreateRemoteThread", StringComparison.Ordinal) || capture.Contains("VirtualProtectEx", StringComparison.Ordinal) ||
+        capture.Contains("Process.Start", StringComparison.Ordinal))
+        throw new Exception("live row evidence capture read-only safety contract");
 }
 static void InstallerLaunchContractTests()
 {
