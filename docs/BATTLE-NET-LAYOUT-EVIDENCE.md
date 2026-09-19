@@ -29,3 +29,17 @@ Each bundle contains `layout-evidence.json` and `layout-evidence.txt`: executabl
 9. Require exact rediscovery of the independently validated new layout and repeated live validation before production use.
 
 A one-build pattern, a repeated RVA delta, a count of 250, or plausible rows alone are never sufficient evidence.
+
+## Season 06 live structural proof
+
+The read-only cold-flow harness was validated against the Season 06 Battle.net
+build (`DA8DE033EFE34B77DA0D6014EFFA9C551C0E30A3CFB4A3B39A52D6B86AD03A09`).
+It excluded the trusted static layout and started with no discovered-layout
+cache. Structural discovery found one semantically valid MP/BR/Resurgence
+triple in about 1.8 seconds, and normal read-only extraction succeeded with
+partially populated leaderboards. The validated layout was written to an
+exact-SHA temporary cache; a second pass loaded and revalidated that cache,
+then matched the trusted Season 06 layout exactly.
+
+This proof contains no player records, names, or identifiers. It validates the
+discovery workflow only; production release integration remains a separate step.

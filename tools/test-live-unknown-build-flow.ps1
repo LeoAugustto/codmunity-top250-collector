@@ -1,30 +1,26 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$CodPath,
+    [Parameter(Mandatory, ParameterSetName = 'Live')][string]$CodPath,
+    [Parameter(Mandatory, ParameterSetName = 'SelfTest')][switch]$ComparisonSelfTest,
     [ValidateRange(1, 3600)][int]$MaxDiscoverySeconds = 120
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$resolvedPath = (Resolve-Path -LiteralPath $CodPath -ErrorAction Stop).Path
-if (-not [string]::Equals([IO.Path]::GetFileName($resolvedPath), 'cod.exe', [StringComparison]::OrdinalIgnoreCase)) { throw 'COD_PATH_MUST_POINT_TO_COD_EXE' }
-Import-Module (Join-Path $projectRoot 'engine\layout_discovery.psm1') -Force
-
-$cod = @(Get-Process -Name cod -ErrorAction SilentlyContinue | Where-Object {
-    try { $_.Path -and [string]::Equals($_.Path, $resolvedPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-})
-if ($cod.Count -ne 1) { throw ('EXPECTED_EXACTLY_ONE_RUNNING_COD_PROCESS count=' + $cod.Count) }
-
 function Convert-AnchorRva([object]$Value) { ConvertTo-BnetLayoutRva $Value }
+function Get-EffectiveEntryStride([object]$Definition) {
+    $property = $Definition.PSObject.Properties['entryStride']
+    if (($null -eq $property) -or ($null -eq $property.Value) -or [string]::IsNullOrWhiteSpace([string]$property.Value)) { return [Int64]0x458 }
+    return Convert-AnchorRva $property.Value
+}
 function Same-Definition([object]$Left, [object]$Right) {
     foreach ($mode in @('mp','br','resurgence')) {
         foreach ($field in @('stateRva','countRva','entry0Rva')) {
             if ((Convert-AnchorRva $Left.datasets.$mode.$field) -ne (Convert-AnchorRva $Right.datasets.$mode.$field)) { return $false }
         }
     }
-    return ((Convert-AnchorRva $Left.entryStride) -eq (Convert-AnchorRva $Right.entryStride))
+    return ((Get-EffectiveEntryStride $Left) -eq (Get-EffectiveEntryStride $Right))
 }
 function Invoke-NormalDynamicExtraction([object]$Definition, [string]$ExpectedSha, [string]$Path) {
     $exporter = Join-Path $projectRoot 'engine\exporters\top250_bnet_dynamic_layout.ps1'
@@ -48,6 +44,30 @@ function Same-Extraction([object[]]$Left, [object[]]$Right) {
     }
     return $true
 }
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $projectRoot 'engine\layout_discovery.psm1') -Force
+if ($ComparisonSelfTest) {
+    $anchors = @{
+        'mp/stateRva'=[Int64]0x200000; 'mp/countRva'=[Int64]0x23B74C; 'mp/entry0Rva'=[Int64]0x23B750
+        'br/stateRva'=[Int64]0x2820F0; 'br/countRva'=[Int64]0x2BD83C; 'br/entry0Rva'=[Int64]0x2BD840
+        'resurgence/stateRva'=[Int64]0x3041E0; 'resurgence/countRva'=[Int64]0x33F92C; 'resurgence/entry0Rva'=[Int64]0x33F930
+    }
+    $explicit = New-BnetLayoutDefinitionFromAnchors -Anchors $anchors -Sha256 ('A' * 64) -MethodVersion 'comparison-fixture'
+    $staticStyle = $explicit | ConvertTo-Json -Depth 8 | ConvertFrom-Json; $staticStyle.PSObject.Properties.Remove('entryStride')
+    $incompatible = $explicit | ConvertTo-Json -Depth 8 | ConvertFrom-Json; $incompatible.entryStride = '0x460'
+    if (-not (Same-Definition $explicit $staticStyle)) { throw 'DEFAULT_ENTRY_STRIDE_NOT_NORMALIZED' }
+    if (Same-Definition $explicit $incompatible) { throw 'INCOMPATIBLE_ENTRY_STRIDE_ACCEPTED' }
+    Write-Output 'UNKNOWN_BUILD_FLOW_COMPARISON_TEST_OK'
+    return
+}
+
+$resolvedPath = (Resolve-Path -LiteralPath $CodPath -ErrorAction Stop).Path
+if (-not [string]::Equals([IO.Path]::GetFileName($resolvedPath), 'cod.exe', [StringComparison]::OrdinalIgnoreCase)) { throw 'COD_PATH_MUST_POINT_TO_COD_EXE' }
+$cod = @(Get-Process -Name cod -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and [string]::Equals($_.Path, $resolvedPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+})
+if ($cod.Count -ne 1) { throw ('EXPECTED_EXACTLY_ONE_RUNNING_COD_PROCESS count=' + $cod.Count) }
 
 $sha = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash.ToUpperInvariant()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('codmunity-unknown-build-flow-' + [guid]::NewGuid().ToString('N'))
