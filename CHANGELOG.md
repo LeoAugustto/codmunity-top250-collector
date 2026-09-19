@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.25-alpha
+
+- Add safe structural Battle.net Top 250 layout discovery for compatible unknown game builds.
+- Validate discovered layouts structurally and semantically before use, then cache them by exact game SHA with runtime revalidation.
+- Keep fail-closed behavior for missing, ambiguous, timed-out, or invalid layout discovery.
+- Preserve Season 06 partial Top 250 synchronization.
+
 ## 0.1.24-alpha
 
 - Add fail-closed Battle.net layout autodiscovery framework with exact-SHA cache revalidation and deterministic multi-anchor requirements.

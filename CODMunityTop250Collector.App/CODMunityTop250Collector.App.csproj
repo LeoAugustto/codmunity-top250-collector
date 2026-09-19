@@ -12,10 +12,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>Assets\codmunity-logo.ico</ApplicationIcon>
     <AssemblyName>CODMunityTop250Collector</AssemblyName>
-    <Version>0.1.24-alpha</Version>
-    <AssemblyVersion>0.1.24.0</AssemblyVersion>
-    <FileVersion>0.1.24.0</FileVersion>
-    <AssemblyInformationalVersion>0.1.24-alpha</AssemblyInformationalVersion>
+    <Version>0.1.25-alpha</Version>
+    <AssemblyVersion>0.1.25.0</AssemblyVersion>
+    <FileVersion>0.1.25.0</FileVersion>
+    <AssemblyInformationalVersion>0.1.25-alpha</AssemblyInformationalVersion>
     <ClosedBetaToken>$([System.Environment]::GetEnvironmentVariable('CODMUNITY_RANKED_SYNC_TOKEN_BUILD'))</ClosedBetaToken>
     <EmbeddedTokenResource>$(MSBuildProjectDirectory)\obj\$(Configuration)\$(TargetFramework)\Generated\embedded-ranked-sync-token.txt</EmbeddedTokenResource>
   </PropertyGroup>
