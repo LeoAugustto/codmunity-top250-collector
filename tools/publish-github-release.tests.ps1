@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'publish-github-release.ps1') -NoInvoke
 
-Assert-AlphaVersion -Value '0.1.19-alpha'
-try { Assert-AlphaVersion -Value '0.1.19'; throw 'Invalid version was accepted.' } catch { if ($_.Exception.Message -eq 'Invalid version was accepted.') { throw } }
+Assert-GitHubAlphaVersion -Value '0.1.19-alpha'
+try { Assert-GitHubAlphaVersion -Value '0.1.19'; throw 'Invalid version was accepted.' } catch { if ($_.Exception.Message -eq 'Invalid version was accepted.') { throw } }
 
 $context = Get-ReleaseContext -TargetVersion '0.1.19-alpha'
 if ($context.Tag -ne 'v0.1.19-alpha') { throw 'Tag derivation failed.' }

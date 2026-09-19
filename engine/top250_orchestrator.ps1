@@ -453,6 +453,8 @@ function Resolve-UnknownBnetLayout {
     param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Manifest)
     $sha = [string]$Identity.Value
     $script:LastLayoutDiscoveryStatus = 'unsupported'
+    # Lookup order for an unknown SHA: exact-SHA cache, trusted static signature,
+    # then structural discovery.  Every candidate still receives live exporter validation.
     $cached = Read-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha
     if ($cached.Status -eq 'OK') {
         Write-Log "LAYOUT_CACHE_LOADED sha=$sha"
@@ -464,6 +466,11 @@ function Resolve-UnknownBnetLayout {
 
     Write-Log "LAYOUT_DISCOVERY_START"
     $discovery = Get-BnetStaticDiscoveryCandidates -CodPath $CodPath -Sha256 $sha -Catalog $Manifest.battlenetDiscovery
+    if (@($discovery.Candidates).Count -eq 0) {
+        $structural = Invoke-BnetStructuralDiscovery -Cod $Cod -Sha256 $sha
+        Write-Log ("LAYOUT_STRUCTURAL_SCAN rawCountLike={0} tripleAddress={1} countRange={2} stateGeometry={3} semantic={4} totalMs={5}" -f $structural.RawCountLikeCandidates,$structural.TripleAddressCandidates,$structural.CountRangeCandidates,$structural.ThreeModeCandidates,$structural.SemanticCandidates,$structural.TotalMilliseconds)
+        $discovery = [pscustomobject]@{ Candidates = @($structural.Candidates); Reason = $structural.Reason }
+    }
     $decision = Select-BnetDiscoveryCandidate -Candidates $discovery.Candidates
     if ($decision.Status -eq 'AMBIGUOUS') { $script:LastLayoutDiscoveryStatus = 'ambiguous'; Write-Log "LAYOUT_DISCOVERY_AMBIGUOUS candidates=$($decision.Count)"; return $null }
     if ($decision.Status -ne 'SINGLE') { if ($discovery.Reason -eq 'NO_TRUSTED_SIGNATURE_METHODS') { $script:LastLayoutDiscoveryStatus = 'pending' }; Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)"; return $null }
@@ -472,7 +479,8 @@ function Resolve-UnknownBnetLayout {
     $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $decision.Candidate
     if (-not $validation.Passed) { Write-Log "LAYOUT_VALIDATION_FAILED reason=$($validation.Reason)"; Write-Log "LAYOUT_DISCOVERY_FAILED reason=RUNTIME_VALIDATION_FAILED"; return $null }
     [void](Write-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha -Definition $decision.Candidate -MethodVersion $decision.MethodVersion)
-    $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=static-anchors"
+    $source = if ([string]::Equals([string]$decision.Candidate.source, 'structural-geometry', [StringComparison]::Ordinal)) { 'structural' } else { 'static-anchors' }
+    $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=$source"
     Write-Log "LAYOUT_DISCOVERY_OK layoutId=$($decision.Candidate.name) sha=$sha"
     return $validation.Layout
 }

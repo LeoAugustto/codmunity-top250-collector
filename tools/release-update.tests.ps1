@@ -73,7 +73,7 @@ try {
 
     function Invoke-MockWorkflow {
         param([scriptblock]$Create, [scriptblock]$Verify, [scriptblock]$Publish)
-        Invoke-ReleaseUpdate -TargetVersion '0.1.8-alpha' -TargetReleaseNotes 'Notes with spaces.' -TargetMinimumUpdaterVersion '0.1.7-alpha' -DotnetLocator { 'dotnet.exe' } -OciCliLocator { 'oci.exe' } -OciProfileValidator { $script:events.Add('profile') } -CreateManifestAction $Create -VerifyAction $Verify -PublishAction $Publish
+        Invoke-ReleaseUpdate -TargetVersion '0.1.8-alpha' -TargetReleaseNotes 'Notes with spaces.' -TargetMinimumUpdaterVersion '0.1.7-alpha' -DotnetLocator { 'dotnet.exe' } -OciCliLocator { 'oci.exe' } -OciProfileValidator { $script:events.Add('profile') } -CreateManifestAction $Create -VerifyAction $Verify -PublishAction $Publish -GitHubPrepareAction { param($context) $script:events.Add('git-prepare') } -GitHubMirrorAction { param($context) $script:events.Add('github-mirror') }
     }
 
     $events.Clear()
@@ -81,22 +81,22 @@ try {
     $verify = { param($c) $script:events.Add('verify') }
     $publish = { param($c,$dry) if ($dry) { $script:events.Add('dry-run') } else { $script:events.Add('publish') } }
     Invoke-MockWorkflow -Create $create -Verify $verify -Publish $publish 6>$null
-    if (($events -join '|') -ne 'profile|create|verify|dry-run|publish') { throw 'Release sequence is invalid.' }
+    if (($events -join '|') -ne 'profile|git-prepare|create|verify|dry-run|publish|github-mirror') { throw 'Release sequence is invalid.' }
 
     Remove-Item -LiteralPath $workflowReleaseDirectory -Recurse -Force
     $events.Clear(); $createFailure = { param($c,$dotnet,$key) $script:events.Add('create'); throw 'create failed' }
     Expect-Failure { Invoke-MockWorkflow -Create $createFailure -Verify $verify -Publish $publish } 'Create failure continued.'
-    if (($events -join '|') -ne 'profile|create') { throw 'Create failure reached later stages.' }
+    if (($events -join '|') -ne 'profile|git-prepare|create') { throw 'Create failure reached later stages.' }
 
     Remove-Item -LiteralPath $workflowReleaseDirectory -Recurse -Force -ErrorAction SilentlyContinue
     $events.Clear(); $verifyFailure = { param($c) $script:events.Add('verify'); throw 'verify failed' }
     Expect-Failure { Invoke-MockWorkflow -Create $create -Verify $verifyFailure -Publish $publish } 'Verify failure continued.'
-    if (($events -join '|') -ne 'profile|create|verify') { throw 'Verify failure reached publish.' }
+    if (($events -join '|') -ne 'profile|git-prepare|create|verify') { throw 'Verify failure reached publish.' }
 
     Remove-Item -LiteralPath $workflowReleaseDirectory -Recurse -Force -ErrorAction SilentlyContinue
     $events.Clear(); $dryFailure = { param($c,$dry) if ($dry) { $script:events.Add('dry-run'); throw 'dry run failed' } else { $script:events.Add('publish') } }
     Expect-Failure { Invoke-MockWorkflow -Create $create -Verify $verify -Publish $dryFailure } 'DryRun failure continued.'
-    if (($events -join '|') -ne 'profile|create|verify|dry-run') { throw 'DryRun failure reached real publish.' }
+    if (($events -join '|') -ne 'profile|git-prepare|create|verify|dry-run') { throw 'DryRun failure reached real publish.' }
 
     Write-Output 'PASS release-update local prechecks, version derivation, explicit minimum, create/verify/DryRun/publish gating, and secret-free mocks'
 }
