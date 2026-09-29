@@ -175,6 +175,40 @@ function Get-ReleaseContext {
     }
 }
 
+function Test-GitHubReleaseExists {
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$GhPath,
+        [Parameter(Mandatory)][string]$Tag
+    )
+
+    # A missing release is expected for a new tag.  Keep native stderr out of
+    # the error pipeline while probing, then accept only GitHub CLI's explicit
+    # not-found result; every other failure remains fatal.
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $exitCode = $null
+    try {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $GhPath release view $Tag --repo $script:Repository 2>$stderrPath | Out-Null
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($exitCode -eq 0) { return $true }
+
+        $stderr = [System.IO.File]::ReadAllText($stderrPath)
+        if ($exitCode -eq 1 -and $stderr -match '(?i)release not found') { return $false }
+        throw "Unable to inspect GitHub Release '$Tag' (gh exit code $exitCode)."
+    }
+    finally {
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function New-PortableZip {
     param([Parameter(Mandatory)]$Context)
     if (Test-Path -LiteralPath $Context.PortableZip) { return }
@@ -244,8 +278,7 @@ function Publish-GitHubReleaseMirror {
     New-Sha256Sums -Context $context
     $assets = @($context.Setup, $context.Msi, $context.PortableZip, $context.Manifest, $context.Signature, $context.Sha256Sums)
 
-    & $gh release view $context.Tag --repo $script:Repository 2>$null | Out-Null
-    $releaseExists = $LASTEXITCODE -eq 0
+    $releaseExists = Test-GitHubReleaseExists -GhPath $gh -Tag $context.Tag
     if (-not $releaseExists) {
         $notesFile = Join-Path ([System.IO.Path]::GetTempPath()) ("codmunity-release-notes-$([guid]::NewGuid().ToString('N')).md")
         try {
