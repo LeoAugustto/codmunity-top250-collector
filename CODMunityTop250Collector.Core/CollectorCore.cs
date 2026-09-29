@@ -99,6 +99,7 @@ public sealed class EngineStatusParser
         var inferredDiscoveryStatus = cycleStatus switch
         {
             "UNSUPPORTED_BUILD" => "pending",
+            "LAYOUT_VALIDATION_PENDING" => "pending",
             "LAYOUT_DISCOVERY_AMBIGUOUS" => "ambiguous",
             "LAYOUT_DISCOVERY_FAILED" => "unsupported",
             _ => "resolved"
@@ -135,6 +136,7 @@ public sealed class EngineStatusParser
 
 public class EngineRunner(AppLogger log)
 {
+    public int LayoutValidationRetryAttempt { get; set; } = 1;
     public virtual async Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
     {
         var exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -152,6 +154,7 @@ public class EngineRunner(AppLogger log)
             StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
         };
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Once", "-InitialDelaySeconds", "0", "-Quiet", "-EmitJson" }) psi.ArgumentList.Add(argument);
+        psi.ArgumentList.Add("-LayoutValidationRetryAttempt"); psi.ArgumentList.Add(Math.Max(1, LayoutValidationRetryAttempt).ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (identity is not null)
         {
             psi.ArgumentList.Add("-VerifiedCodPid"); psi.ArgumentList.Add(identity.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -264,10 +267,12 @@ public class CodProcessMonitor
 
 public sealed class CollectorScheduler
 {
-    private readonly CodProcessMonitor monitor; private readonly EngineRunner engine; private readonly EngineStatusParser parser; private readonly RankedPlayersApiClient api; private readonly AppLogger log; private readonly string engineDir; private readonly BuildIdentityCache buildIdentity; private readonly SemaphoreSlim cycleLock = new(1, 1); private DateTimeOffset? nextCollectionAtUtc; private volatile bool updatePreparationRequested;
+    private static readonly TimeSpan LayoutValidationRetryDelay = TimeSpan.FromSeconds(30);
+    private readonly CodProcessMonitor monitor; private readonly EngineRunner engine; private readonly EngineStatusParser parser; private readonly RankedPlayersApiClient api; private readonly AppLogger log; private readonly string engineDir; private readonly BuildIdentityCache buildIdentity; private readonly SemaphoreSlim cycleLock = new(1, 1); private DateTimeOffset? nextCollectionAtUtc; private int layoutValidationRetryAttempt = 1; private volatile bool updatePreparationRequested;
     public event Action<CollectorSnapshot>? Changed; public CollectorSettings Settings { get; private set; } = new(); public CollectorSnapshot Snapshot { get; private set; } = new(true); public bool IsRunningCycle => cycleLock.CurrentCount == 0;
     public CollectorScheduler(CodProcessMonitor monitor, EngineRunner engine, EngineStatusParser parser, RankedPlayersApiClient api, AppLogger log, string engineDir, BuildIdentityCache? buildIdentity = null) { this.monitor = monitor; this.engine = engine; this.parser = parser; this.api = api; this.log = log; this.engineDir = engineDir; this.buildIdentity = buildIdentity ?? new BuildIdentityCache(new FileBuildHasher(), log); }
     public void UpdateSettings(CollectorSettings settings) { Settings = settings.Normalized(); Publish(Snapshot with { Enabled = Settings.CollectorEnabled }); log.Write(Settings.CollectorEnabled ? "COLLECTOR_ENABLED" : "COLLECTOR_DISABLED"); }
+    public static TimeSpan GetNextCollectionDelay(CollectorSnapshot snapshot, int layoutValidationRetryAttempt = 1) => snapshot.LayoutDiscoveryStatus == "pending" && snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" && layoutValidationRetryAttempt <= 10 ? LayoutValidationRetryDelay : TimeSpan.FromSeconds(300);
     public async Task RunAsync(CancellationToken token)
     {
         int? knownPid = null;
@@ -276,9 +281,15 @@ public sealed class CollectorScheduler
             if (!Settings.CollectorEnabled) { nextCollectionAtUtc = null; Publish(Snapshot with { Enabled = false, Game = "Closed", CycleStatus = "DISABLED", NextCollection = null }); await Task.Delay(TimeSpan.FromSeconds(5), token); continue; }
             var pid = monitor.FindSinglePid();
             if (pid is null) { if (knownPid is not null) { log.Write("COD_CLOSED"); buildIdentity.Invalidate("process-closed"); } knownPid = null; nextCollectionAtUtc = null; Publish(Snapshot with { Enabled = true, Game = "Closed", CycleStatus = "COD_NOT_RUNNING", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(5), token); continue; }
-            if (pid != knownPid) { if (knownPid is not null) buildIdentity.Invalidate("pid-changed"); knownPid = pid; log.Write("COD_DETECTED", $"pid={pid}"); Publish(Snapshot with { Enabled = true, Game = "Running", CycleStatus = "WAITING_FOR_GAME", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(30), token); if (monitor.FindSinglePid() != pid) continue; }
+            if (pid != knownPid) { if (knownPid is not null) buildIdentity.Invalidate("pid-changed"); knownPid = pid; layoutValidationRetryAttempt = 1; log.Write("COD_DETECTED", $"pid={pid}"); Publish(Snapshot with { Enabled = true, Game = "Running", CycleStatus = "WAITING_FOR_GAME", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(30), token); if (monitor.FindSinglePid() != pid) continue; }
             if (updatePreparationRequested) { await Task.Delay(TimeSpan.FromSeconds(1), token); continue; }
-            await RunCycleAsync(pid.Value, token); var until = DateTimeOffset.UtcNow.AddSeconds(300); nextCollectionAtUtc = until; Publish(Snapshot with { NextCollection = until });
+            await RunCycleAsync(pid.Value, token);
+            var retryPendingLayout = Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING";
+            var until = DateTimeOffset.UtcNow.Add(GetNextCollectionDelay(Snapshot, layoutValidationRetryAttempt));
+            nextCollectionAtUtc = until;
+            Publish(Snapshot with { NextCollection = until });
+            if (retryPendingLayout) { log.Write("LAYOUT_VALIDATION_RETRY_SCHEDULED", $"attempt={layoutValidationRetryAttempt + 1} retrySeconds={(int)(until - DateTimeOffset.UtcNow).TotalSeconds}"); layoutValidationRetryAttempt++; }
+            else layoutValidationRetryAttempt = 1;
             while (DateTimeOffset.UtcNow < until && !token.IsCancellationRequested && monitor.FindSinglePid() == knownPid) await Task.Delay(TimeSpan.FromSeconds(5), token);
         }
     }
@@ -297,6 +308,7 @@ public sealed class CollectorScheduler
         try
         {
             var identity = await buildIdentity.GetOrCreateAsync(monitor.Describe(pid), token);
+            engine.LayoutValidationRetryAttempt = layoutValidationRetryAttempt;
             var result = await engine.RunOnceAsync(engineDir, identity, token);
             if (string.IsNullOrWhiteSpace(result.StdOut)) throw new InvalidDataException("Engine did not return JSON.");
             var previous = Snapshot; var parsed = parser.Parse(result.StdOut, true, started);

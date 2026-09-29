@@ -31,8 +31,8 @@ try
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
-    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.25-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.25-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("layoutDiscoveryStatus=resolved", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.26-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.26-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("layoutDiscoveryStatus=resolved", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     LayoutDiscoveryUiStateTests(parser);
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
@@ -44,6 +44,7 @@ try
     if (!ptBrStatus.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrStatus.Contains(localHydratedTime.ToString("T", ptBr)) || !enUsStatus.Contains(localHydratedTime.ToString("d", enUs)) || !enUsStatus.Contains(localHydratedTime.ToString("T", enUs)) || !ptBrCard.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrCard.Contains(localHydratedTime.ToString("t", ptBr))) throw new Exception("localized timestamp formatting");
     StartupRegistrationTests();
     StationWatcherTests().GetAwaiter().GetResult();
+    SchedulerTransientLayoutValidationTests(log).GetAwaiter().GetResult();
     SafeModeNativeDialogContractTests();
     LayoutDiscoveryContractTests();
     LayoutEvidenceCaptureContractTests();
@@ -220,7 +221,7 @@ static async Task StationWatcherTests()
     }
     if (crashPlatform.CloseCalls != 3 || crashPlatform.LaunchCalls != 0 || crashWatcher.Snapshot.State != StationWatcherState.CrashLoopBackoff) throw new Exception("kill failure proceeded to Battle.net or skipped crash-loop backoff");
 
-    foreach (var unresolvedCycleStatus in new[] { "UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_FAILED", "LAYOUT_DISCOVERY_AMBIGUOUS" })
+    foreach (var unresolvedCycleStatus in new[] { "UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_FAILED", "LAYOUT_DISCOVERY_AMBIGUOUS", "LAYOUT_VALIDATION_PENDING" })
     {
         var unsupportedPlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(801, now.AddMinutes(-30)), InternetAvailable = true };
         var unsupportedSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: unresolvedCycleStatus);
@@ -235,6 +236,9 @@ static void LayoutDiscoveryUiStateTests(EngineStatusParser parser)
     var started = DateTimeOffset.Parse("2025-12-31T23:59:59Z");
     var pending = parser.Parse(status, true, started);
     if (pending.Build != "LayoutDiscoveryPending" || pending.LayoutDiscoveryStatus != "pending") throw new Exception("unknown build discovery pending state");
+    var transient = parser.Parse(status.Replace("UNSUPPORTED_BUILD", "LAYOUT_VALIDATION_PENDING", StringComparison.Ordinal).Replace("unknown", "bnet-cached", StringComparison.Ordinal), true, started);
+    if (transient.Build != "LayoutDiscoveryPending" || transient.LayoutDiscoveryStatus != "pending" || transient.CycleStatus != "LAYOUT_VALIDATION_PENDING") throw new Exception("transient layout validation pending state");
+    if (CollectorScheduler.GetNextCollectionDelay(transient) != TimeSpan.FromSeconds(30) || CollectorScheduler.GetNextCollectionDelay(transient, 11) != TimeSpan.FromSeconds(300) || CollectorScheduler.GetNextCollectionDelay(new CollectorSnapshot(true, Game: "Running", CycleStatus: "OK")) != TimeSpan.FromSeconds(300)) throw new Exception("layout validation retry cadence");
     var failed = parser.Parse(status.Replace("UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_FAILED", StringComparison.Ordinal), true, started);
     if (failed.Build != "LayoutUnsupported" || failed.LayoutDiscoveryStatus != "unsupported") throw new Exception("discovery failed state");
     var ambiguous = parser.Parse(status.Replace("UNSUPPORTED_BUILD", "LAYOUT_DISCOVERY_AMBIGUOUS", StringComparison.Ordinal), true, started);
@@ -679,6 +683,23 @@ static async Task SchedulerBuildIdentityIntegrationTests(AppLogger log)
     if (Count(content, "BUILD_IDENTITY_CACHE_MISS pid=4321 platform=battlenet") != 1 || Count(content, "BUILD_HASH_START pid=4321") != 1 || Count(content, "BUILD_HASH_OK pid=4321") != 1 || Count(content, "BUILD_IDENTITY_CACHE_HIT pid=4321 platform=battlenet") != 2) throw new Exception("scheduler production composition logging");
 }
 
+static async Task SchedulerTransientLayoutValidationTests(AppLogger log)
+{
+    const string sha = "1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
+    var monitor = new FakeCodProcessMonitor(new CodProcessDescriptor(6789, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch));
+    var runner = new TransientLayoutValidationEngineRunner(log);
+    using var api = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
+    var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(sha), log));
+
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (scheduler.Snapshot.CycleStatus != "LAYOUT_VALIDATION_PENDING" || scheduler.Snapshot.LayoutDiscoveryStatus != "pending" || scheduler.Snapshot.Build != "LayoutDiscoveryPending") throw new Exception("transient cache validation was not kept pending");
+    if (CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(30)) throw new Exception("pending layout did not select the short retry cadence");
+
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (runner.RunCount != 2 || scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.LayoutDiscoveryStatus != "resolved" || CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(300)) throw new Exception("later layout validation success did not resume normal collection");
+    if (runner.Identities.Count != 2 || runner.Identities.Any(identity => identity?.Sha256 != sha)) throw new Exception("transient layout retry changed the verified game process identity");
+}
+
 static async Task SchedulerApiPriorityTests(AppLogger log)
 {
     var descriptor = new CodProcessDescriptor(9876, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch);
@@ -1006,6 +1027,21 @@ sealed class FakeEngineRunner(AppLogger log) : EngineRunner(log)
         Identities.Add(identity);
         var timestamp = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         var json = $"{{\"capturedAt\":\"{timestamp}\",\"platform\":\"battlenet\",\"layout\":\"bnet-current\",\"cycleStatus\":\"OK\",\"datasets\":{{\"mp\":{{\"status\":\"WAITING\"}},\"br\":{{\"status\":\"WAITING\"}},\"resurgence\":{{\"status\":\"WAITING\"}}}}}}";
+        return Task.FromResult((0, json, string.Empty));
+    }
+}
+
+sealed class TransientLayoutValidationEngineRunner(AppLogger log) : EngineRunner(log)
+{
+    public int RunCount { get; private set; }
+    public List<VerifiedBuildIdentity?> Identities { get; } = [];
+    public override Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
+    {
+        Identities.Add(identity); RunCount++;
+        var capturedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        var json = RunCount == 1
+            ? $"{{\"capturedAt\":\"{capturedAt}\",\"platform\":\"battlenet\",\"layout\":\"bnet-cached\",\"layoutDiscoveryStatus\":\"pending\",\"cycleStatus\":\"LAYOUT_VALIDATION_PENDING\",\"datasets\":{{}}}}"
+            : $"{{\"capturedAt\":\"{capturedAt}\",\"platform\":\"battlenet\",\"layout\":\"bnet-cached\",\"layoutDiscoveryStatus\":\"resolved\",\"cycleStatus\":\"OK\",\"datasets\":{{\"mp\":{{\"status\":\"WAITING\"}},\"br\":{{\"status\":\"WAITING\"}},\"resurgence\":{{\"status\":\"WAITING\"}}}}}}";
         return Task.FromResult((0, json, string.Empty));
     }
 }

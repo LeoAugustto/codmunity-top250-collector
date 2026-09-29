@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
-    <OutputName>CODMunityTop250Collector-0.1.25-alpha-win-x64</OutputName>
+    <OutputName>CODMunityTop250Collector-0.1.26-alpha-win-x64</OutputName>
     <OutputPath>$(MSBuildProjectDirectory)\..\dist\msi\</OutputPath>
   </PropertyGroup>
   <ItemGroup>

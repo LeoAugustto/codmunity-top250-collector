@@ -57,11 +57,11 @@ The MSI is an internal package for the signed automatic-update flow (`manifest` 
 
 ### Same-version development validation
 
-Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.25-alpha over an already installed 0.1.25-alpha in place.
+Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.26-alpha over an already installed 0.1.26-alpha in place.
 
 After generating the portable, MSI, and Setup artifacts, close the Collector and run:
 
-    .\tools\validate-local-install.ps1 -Version '0.1.25-alpha' -ReplaceAndValidate
+    .\tools\validate-local-install.ps1 -Version '0.1.26-alpha' -ReplaceAndValidate
 
 The helper performs a clean registered Setup uninstall, opens the normal interactive Setup install, then SHA-256 compares every portable payload file with its installed counterpart. It fails if any installed file is stale, missing, or differs. This workflow is for same-version development validation only; normal releases and the signed MSI updater flow are unchanged.
 
@@ -80,7 +80,7 @@ See [Battle.net layout evidence workflow](docs/BATTLE-NET-LAYOUT-EVIDENCE.md) fo
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.25-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.26-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.

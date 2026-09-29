@@ -9,6 +9,7 @@ param(
     [string]$VerifiedPlatform = "",
     [string]$VerifiedBuildSha256 = "",
     [string]$VerifiedLayout = "",
+    [ValidateRange(1, 100000)][int]$LayoutValidationRetryAttempt = 1,
     [switch]$StaticDiscoveryOnly,
     [string]$StaticCodPath = "",
     [string]$StaticDiscoverySha256 = ""
@@ -449,8 +450,19 @@ function Invoke-BnetLayoutValidation {
     return [pscustomobject]@{ Passed = $true; Reason = 'OK'; Layout = $first.Layout; Results = $second.Results }
 }
 
+function Test-TransientBnetDiscoveryReason {
+    param([string]$Reason)
+    return $Reason -in @('NO_TRUSTED_SIGNATURE_METHODS', 'NO_UNIQUE_VALID_GEOMETRY', 'TIMEOUT', 'RUNTIME_VALIDATION_FAILED')
+}
+
+function Set-BnetLayoutValidationPending {
+    param([string]$Source, [string]$Reason)
+    $script:LastLayoutDiscoveryStatus = 'pending'
+    Write-Log "LAYOUT_VALIDATION_PENDING source=$Source reason=$Reason retrySeconds=30"
+}
+
 function Resolve-UnknownBnetLayout {
-    param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Manifest)
+    param([Diagnostics.Process]$Cod, [string]$CodPath, [object]$Identity, [object]$Manifest, [int]$ValidationRetryAttempt = 1)
     $sha = [string]$Identity.Value
     $script:LastLayoutDiscoveryStatus = 'unsupported'
     # Lookup order for an unknown SHA: exact-SHA cache, trusted static signature,
@@ -458,8 +470,13 @@ function Resolve-UnknownBnetLayout {
     $cached = Read-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha
     if ($cached.Status -eq 'OK') {
         Write-Log "LAYOUT_CACHE_LOADED sha=$sha"
+        if ($ValidationRetryAttempt -gt 1) { Write-Log "LAYOUT_VALIDATION_RETRY attempt=$ValidationRetryAttempt source=cache" }
         $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $cached.Definition
         if ($validation.Passed) { $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=cache"; return $validation.Layout }
+        if ((Get-BnetCacheValidationDisposition -CacheStatus $cached.Status -ValidationReason $validation.Reason) -eq 'PENDING') {
+            Set-BnetLayoutValidationPending -Source 'cache' -Reason $validation.Reason
+            return $null
+        }
         Write-Log "LAYOUT_CACHE_REJECTED reason=$($validation.Reason)"
     }
     elseif ($cached.Status -eq 'REJECTED') { Write-Log "LAYOUT_CACHE_REJECTED reason=$($cached.Reason)" }
@@ -473,12 +490,25 @@ function Resolve-UnknownBnetLayout {
     }
     $decision = Select-BnetDiscoveryCandidate -Candidates $discovery.Candidates
     if ($decision.Status -eq 'AMBIGUOUS') { $script:LastLayoutDiscoveryStatus = 'ambiguous'; Write-Log "LAYOUT_DISCOVERY_AMBIGUOUS candidates=$($decision.Count)"; return $null }
-    if ($decision.Status -ne 'SINGLE') { if ($discovery.Reason -eq 'NO_TRUSTED_SIGNATURE_METHODS') { $script:LastLayoutDiscoveryStatus = 'pending' }; Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)"; return $null }
+    if ($decision.Status -ne 'SINGLE') {
+        if ((Test-TransientBnetDiscoveryReason -Reason $discovery.Reason) -and ($ValidationRetryAttempt -le 10)) {
+            Set-BnetLayoutValidationPending -Source 'structural' -Reason $discovery.Reason
+        }
+        else { Write-Log "LAYOUT_DISCOVERY_FAILED reason=$($discovery.Reason)" }
+        return $null
+    }
     Write-Log "LAYOUT_CANDIDATE_FOUND method=$($decision.MethodVersion)"
 
     $validation = Invoke-BnetLayoutValidation -Cod $Cod -CodPath $CodPath -Identity $Identity -Definition $decision.Candidate
-    if (-not $validation.Passed) { Write-Log "LAYOUT_VALIDATION_FAILED reason=$($validation.Reason)"; Write-Log "LAYOUT_DISCOVERY_FAILED reason=RUNTIME_VALIDATION_FAILED"; return $null }
-    [void](Write-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha -Definition $decision.Candidate -MethodVersion $decision.MethodVersion)
+    if (-not $validation.Passed) {
+        if ((Test-BnetTransientLiveValidationReason -Reason $validation.Reason) -and ($ValidationRetryAttempt -le 10)) {
+            Set-BnetLayoutValidationPending -Source 'structural' -Reason $validation.Reason
+        }
+        else { Write-Log "LAYOUT_VALIDATION_FAILED reason=$($validation.Reason)"; Write-Log "LAYOUT_DISCOVERY_FAILED reason=RUNTIME_VALIDATION_FAILED" }
+        return $null
+    }
+    $cachePath = Write-BnetDiscoveredLayout -CollectorRoot $CollectorRoot -Sha256 $sha -Definition $decision.Candidate -MethodVersion $decision.MethodVersion
+    Write-Log ("LAYOUT_CACHE_WRITTEN sha={0} path={1}" -f $sha, (Join-Path 'layouts\discovered' (Split-Path -Leaf $cachePath)))
     $source = if ([string]::Equals([string]$decision.Candidate.source, 'structural-geometry', [StringComparison]::Ordinal)) { 'structural' } else { 'static-anchors' }
     $script:LastLayoutDiscoveryStatus = 'resolved'; Write-Log "LAYOUT_VALIDATION_OK source=$source"
     Write-Log "LAYOUT_DISCOVERY_OK layoutId=$($decision.Candidate.name) sha=$sha"
@@ -550,7 +580,7 @@ if ($StaticDiscoveryOnly) {
     else { Write-Host ("LAYOUT_DISCOVERY_DIAGNOSTIC sha={0} status={1} candidates={2} reason={3}" -f $diagnostic.sha256, $diagnostic.status, $diagnostic.candidates, $diagnostic.reason) }
     exit 0
 }
-$trackedPid = $null; $lastWaitState = $null; $activeLayout = $null; $activeIdentity = $null
+$trackedPid = $null; $lastWaitState = $null; $activeLayout = $null; $activeIdentity = $null; $nextLayoutValidationRetryAt = $null; $layoutValidationRetryAttempt = $LayoutValidationRetryAttempt
 
 while ($true) {
     $codState = Get-CodState
@@ -563,7 +593,7 @@ while ($true) {
     $lastWaitState = $null
     $cod = $codState.Candidate.Process; $codPath = $codState.Candidate.Path
     if ($trackedPid -ne $cod.Id) {
-        $trackedPid = $cod.Id; $activeIdentity = Get-VerifiedBuildIdentity -Cod $cod -CodPath $codPath; if ($null -eq $activeIdentity) { $activeIdentity = Get-CodIdentity -Cod $cod -CodPath $codPath }; $activeLayout = $null; $initialDelayApplied = $false
+        $trackedPid = $cod.Id; $activeIdentity = Get-VerifiedBuildIdentity -Cod $cod -CodPath $codPath; if ($null -eq $activeIdentity) { $activeIdentity = Get-CodIdentity -Cod $cod -CodPath $codPath }; $activeLayout = $null; $initialDelayApplied = $false; $nextLayoutValidationRetryAt = $null; $layoutValidationRetryAttempt = $LayoutValidationRetryAttempt
         if ($activeIdentity.Type -eq "unavailable") {
             Write-Log ('COD_DETECTED pid={0} codPath="{1}" platform={2} buildIdentityUnavailable reason="{3}" osVersion="{4}" powerShellVersion={5}' -f $cod.Id, $codPath, $activeIdentity.PlatformHint, $activeIdentity.Error, [Environment]::OSVersion.VersionString, $PSVersionTable.PSVersion)
             Write-Log ("BUILD_ID_UNAVAILABLE codPath=`"{0}`" reason=`"{1}`"" -f $codPath, $activeIdentity.Error)
@@ -580,15 +610,17 @@ while ($true) {
                 $cod = $check.Candidate.Process; $codPath = $check.Candidate.Path
             }
             Write-Log "BUILD_UNKNOWN sha=$($activeIdentity.Value)"
-            $activeLayout = Resolve-UnknownBnetLayout -Cod $cod -CodPath $codPath -Identity $activeIdentity -Manifest $manifest
+            $activeLayout = Resolve-UnknownBnetLayout -Cod $cod -CodPath $codPath -Identity $activeIdentity -Manifest $manifest -ValidationRetryAttempt $layoutValidationRetryAttempt
         }
         $platform = if ($null -eq $activeLayout) { if ($activeIdentity.PlatformHint) { $activeIdentity.PlatformHint } else { "unknown" } } else { $activeLayout.platform }
         $layoutName = if ($null -eq $activeLayout) { "unknown" } else { $activeLayout.layout }
         $identityLog = if ($activeIdentity.Type -eq "sha256") { "codSha256=$($activeIdentity.Value)" } else { "runtimeBuildId=$($activeIdentity.Value)" }
         Write-Log ('COD_DETECTED pid={0} codPath="{1}" {2} platform={3} layout={4} osVersion="{5}" powerShellVersion={6} initialDelaySeconds={7}' -f $cod.Id, $codPath, $identityLog, $platform, $layoutName, [Environment]::OSVersion.VersionString, $PSVersionTable.PSVersion, $InitialDelaySeconds)
         if ($null -eq $activeLayout) {
-            Write-Log ("UNSUPPORTED_BUILD codPath=`"{0}`" {1}" -f $codPath, $identityLog)
-            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus "UNSUPPORTED_BUILD" -LayoutDiscoveryStatus $script:LastLayoutDiscoveryStatus
+            $unresolvedCycleStatus = if ($script:LastLayoutDiscoveryStatus -eq 'pending') { 'LAYOUT_VALIDATION_PENDING' } else { 'UNSUPPORTED_BUILD' }
+            if ($unresolvedCycleStatus -eq 'UNSUPPORTED_BUILD') { Write-Log ("UNSUPPORTED_BUILD codPath=`"{0}`" {1}" -f $codPath, $identityLog) }
+            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus $unresolvedCycleStatus -LayoutDiscoveryStatus $script:LastLayoutDiscoveryStatus
+            if ($script:LastLayoutDiscoveryStatus -eq 'pending') { $nextLayoutValidationRetryAt = [DateTime]::UtcNow.AddSeconds(30); $layoutValidationRetryAttempt++ }
             if ($Once) { exit 2 }
             Start-Sleep -Seconds 5; continue
         }
@@ -597,6 +629,14 @@ while ($true) {
             $check = Get-CodState
             if (($check.State -ne "FOUND") -or ($check.Candidate.Process.Id -ne $trackedPid)) { Write-Log "COD_CHANGED_DURING_INITIAL_DELAY"; $trackedPid = $null; $activeLayout = $null; $activeIdentity = $null; continue }
             $cod = $check.Candidate.Process; $codPath = $check.Candidate.Path
+        }
+    }
+    if (($null -eq $activeLayout) -and ($script:LastLayoutDiscoveryStatus -eq 'pending') -and ($null -ne $nextLayoutValidationRetryAt) -and ([DateTime]::UtcNow -ge $nextLayoutValidationRetryAt)) {
+        $activeLayout = Resolve-UnknownBnetLayout -Cod $cod -CodPath $codPath -Identity $activeIdentity -Manifest $manifest -ValidationRetryAttempt $layoutValidationRetryAttempt
+        if ($null -eq $activeLayout) {
+            $unresolvedCycleStatus = if ($script:LastLayoutDiscoveryStatus -eq 'pending') { 'LAYOUT_VALIDATION_PENDING' } else { 'UNSUPPORTED_BUILD' }
+            Write-IdentityStatus -CodPid $cod.Id -CodPath $codPath -Identity $activeIdentity -CycleStatus $unresolvedCycleStatus -LayoutDiscoveryStatus $script:LastLayoutDiscoveryStatus
+            if ($script:LastLayoutDiscoveryStatus -eq 'pending') { $nextLayoutValidationRetryAt = [DateTime]::UtcNow.AddSeconds(30); $layoutValidationRetryAttempt++ }
         }
     }
     if ($null -eq $activeLayout) { if ($Once) { exit 2 }; Start-Sleep -Seconds 5; continue }

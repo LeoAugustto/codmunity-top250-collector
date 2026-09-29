@@ -28,7 +28,8 @@ try {
 
     $source = Get-Content -LiteralPath $scriptPath -Raw
     if ($source -match 'Write-(Host|Output|Error).*CODMUNITY_RANKED_SYNC_TOKEN_BUILD' -or $source -match 'Get-ChildItem\s+Env:|\bprintenv\b|\bset\s*$') { throw 'Build helper could expose environment secrets.' }
-    Write-Output 'PASS build-closed-beta inherited environment credential, secure prompt fallback, cleanup, and secret-safe output'
+    if (-not $source.Contains('Get-CurrentSourceRevision') -or -not $source.Contains('git -C $projectRoot diff --quiet') -or -not $source.Contains('SourceRevisionId=') -or -not $source.Contains('Assert-ArtifactSourceRevision')) { throw 'Build helper does not guard the published source revision.' }
+    Write-Output 'PASS build-closed-beta inherited environment credential, secure prompt fallback, cleanup, secret-safe output, and source-revision artifact guard'
 }
 finally {
     Remove-Item Env:CODMUNITY_RANKED_SYNC_TOKEN_BUILD -ErrorAction SilentlyContinue

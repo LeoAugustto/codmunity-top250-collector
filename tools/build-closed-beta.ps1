@@ -16,8 +16,9 @@ $bundleProject = Join-Path $projectRoot 'Installer.Bundle\CODMunityTop250Collect
 $portableDirectory = Join-Path $projectRoot 'dist\portable'
 $appDll = Join-Path $portableDirectory 'CODMunityTop250Collector.dll'
 $watcherTemplate = Join-Path $portableDirectory 'Assets\watchdog\bnet-play.png'
-$msi = Join-Path $projectRoot 'dist\msi\CODMunityTop250Collector-0.1.25-alpha-win-x64.msi'
-$setup = Join-Path $projectRoot 'dist\setup\CODMunityTop250Collector-0.1.25-alpha-Setup.exe'
+$releaseVersion = '0.1.26-alpha'
+$msi = Join-Path $projectRoot ('dist\msi\CODMunityTop250Collector-' + $releaseVersion + '-win-x64.msi')
+$setup = Join-Path $projectRoot ('dist\setup\CODMunityTop250Collector-' + $releaseVersion + '-Setup.exe')
 $resourceName = 'CODMunityTop250Collector.App.EmbeddedRankedSyncToken'
 $succeeded = $false
 $credential = 'NOT PRESENT'
@@ -30,6 +31,35 @@ function Invoke-RequiredDotnet {
 
     & dotnet @Arguments 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$Step failed (exit code $LASTEXITCODE)." }
+}
+
+function Get-CurrentSourceRevision {
+    & git -C $projectRoot diff --quiet
+    $workingTreeExitCode = $LASTEXITCODE
+    & git -C $projectRoot diff --cached --quiet
+    $indexExitCode = $LASTEXITCODE
+    if (($workingTreeExitCode -ne 0) -or ($indexExitCode -ne 0)) { throw 'Release build requires committed source changes so artifact metadata can identify the exact source revision.' }
+    $revision = (& git -C $projectRoot rev-parse --verify HEAD 2>$null).Trim()
+    $exitCode = $LASTEXITCODE
+    if (($exitCode -ne 0) -or ($revision -notmatch '^[0-9a-f]{40}$')) { throw 'Unable to resolve the exact Git source revision for the release build.' }
+    return $revision
+}
+
+function Get-AssemblyInformationalVersion {
+    param([Parameter(Mandatory)][string]$AssemblyPath)
+
+    $assembly = [Reflection.Assembly]::LoadFrom($AssemblyPath)
+    $attribute = $assembly.GetCustomAttributes([Reflection.AssemblyInformationalVersionAttribute], $false) | Select-Object -First 1
+    if ($null -eq $attribute) { throw 'Published application assembly has no informational version.' }
+    return [string]$attribute.InformationalVersion
+}
+
+function Assert-ArtifactSourceRevision {
+    param([Parameter(Mandatory)][string]$AssemblyPath, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][string]$SourceRevision)
+
+    $expected = $Version + '+' + $SourceRevision
+    $actual = Get-AssemblyInformationalVersion -AssemblyPath $AssemblyPath
+    if (-not [string]::Equals($actual, $expected, [StringComparison]::Ordinal)) { throw "Published informational version does not match the release source revision. expected=$expected actual=$actual" }
 }
 
 function Get-EmbeddedCredentialPresent {
@@ -76,16 +106,20 @@ if (-not $NoInvoke) {
 $credentialState = $null
 try {
     Push-Location $projectRoot
+    $sourceRevision = Get-CurrentSourceRevision
     $credentialState = Get-ClosedBetaCredentialState
-    Invoke-RequiredDotnet -Step 'Release build' -Arguments @('build', $solution, '-c', 'Release', '--nologo')
+    $sourceRevisionProperty = '-p:SourceRevisionId=' + $sourceRevision
+    Invoke-RequiredDotnet -Step 'Release metadata clean' -Arguments @('clean', $solution, '-c', 'Release', '--nologo')
+    Invoke-RequiredDotnet -Step 'Release build' -Arguments @('build', $solution, '-c', 'Release', '--nologo', $sourceRevisionProperty)
     Invoke-RequiredDotnet -Step 'Offline tests' -Arguments @('run', '--project', $testsProject, '-c', 'Release', '--no-build', '--no-restore')
-    Invoke-RequiredDotnet -Step 'UpdateHost runtime build' -Arguments @('build', $updateHostProject, '-c', 'Release', '-r', 'win-x64', '--nologo')
-    Invoke-RequiredDotnet -Step 'Portable publish' -Arguments @('publish', $appProject, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'false', '-o', $portableDirectory, '--no-restore', '--nologo')
+    Invoke-RequiredDotnet -Step 'UpdateHost runtime build' -Arguments @('build', $updateHostProject, '-c', 'Release', '-r', 'win-x64', '--nologo', $sourceRevisionProperty)
+    Invoke-RequiredDotnet -Step 'Portable publish' -Arguments @('publish', $appProject, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'false', '-o', $portableDirectory, '--no-restore', '--nologo', $sourceRevisionProperty)
     Invoke-RequiredDotnet -Step 'MSI build' -Arguments @('build', $msiProject, '-c', 'Release', '--no-restore', '--nologo')
     Invoke-RequiredDotnet -Step 'Setup build' -Arguments @('build', $bundleProject, '-c', 'Release', '--no-restore', '--nologo')
     foreach ($artifact in @($appDll, $watcherTemplate, $msi, $setup)) {
         if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw "Expected artifact is unavailable: $artifact" }
     }
+    Assert-ArtifactSourceRevision -AssemblyPath $appDll -Version $releaseVersion -SourceRevision $sourceRevision
     $credential = if (Get-EmbeddedCredentialPresent -AssemblyPath $appDll) { 'PRESENT' } else { 'NOT PRESENT' }
     $appDllHash = (Get-FileHash -LiteralPath $appDll -Algorithm SHA256).Hash
     $msiHash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash
@@ -94,7 +128,7 @@ try {
 }
 catch {
     Write-Output 'BUILD CLOSED BETA: FAILED'
-    Write-Output ('Version: 0.1.25-alpha')
+    Write-Output ('Version: ' + $releaseVersion)
     exit 1
 }
 finally {
@@ -104,7 +138,7 @@ finally {
 
 if ($succeeded) {
     Write-Output 'BUILD CLOSED BETA: OK'
-    Write-Output 'Version: 0.1.25-alpha'
+    Write-Output ('Version: ' + $releaseVersion)
     Write-Output ('Portable: ' + $portableDirectory)
     Write-Output ('MSI: ' + $msi)
     Write-Output ('Setup: ' + $setup)

@@ -295,7 +295,7 @@ public sealed class StationWatcher
     private async Task MonitorHealthyCodAsync(StationCodProcess cod, DateTimeOffset now, CancellationToken token)
     {
         var localSnapshot = collection();
-        if (localSnapshot.CycleStatus is "UNSUPPORTED_BUILD" or "LAYOUT_DISCOVERY_FAILED" or "LAYOUT_DISCOVERY_AMBIGUOUS")
+        if (localSnapshot.CycleStatus is "UNSUPPORTED_BUILD" or "LAYOUT_DISCOVERY_FAILED" or "LAYOUT_DISCOVERY_AMBIGUOUS" or "LAYOUT_VALIDATION_PENDING")
         {
             if (!layoutUnsupportedLogged)
             {

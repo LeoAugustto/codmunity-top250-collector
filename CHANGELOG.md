@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.26-alpha
+
+- Keep a structurally valid discovered Battle.net layout in a pending state while Call of Duty data is temporarily unavailable for live validation.
+- Retry transient layout validation after 30 seconds without restarting Call of Duty or Battle.net.
+- Bind release artifact build metadata to the exact source revision used for the build.
+
 ## 0.1.25-alpha
 
 - Add safe structural Battle.net Top 250 layout discovery for compatible unknown game builds.

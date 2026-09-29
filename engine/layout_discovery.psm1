@@ -7,6 +7,18 @@ $script:DefaultEntryStride = 0x458
 $script:KnownStateToCount = 0x3B74C
 $script:KnownModeBlockSpacing = 0x820F0
 
+function Test-BnetTransientLiveValidationReason {
+    param([string]$Reason)
+    return $Reason -in @('LIVE_SAMPLE_ONE_FAILED', 'LIVE_SAMPLE_TWO_FAILED', 'REPEATED_READ_INCONSISTENT', 'MODULE_REGION_UNAVAILABLE')
+}
+
+function Get-BnetCacheValidationDisposition {
+    param([string]$CacheStatus, [string]$ValidationReason)
+    if ($CacheStatus -ne 'OK') { return 'REJECTED' }
+    if (Test-BnetTransientLiveValidationReason -Reason $ValidationReason) { return 'PENDING' }
+    return 'REJECTED'
+}
+
 function Initialize-BnetStructuralDiscoveryNative {
     if ('Top250StructuralDiscoveryNative' -as [type]) { return }
     Add-Type @"
@@ -438,4 +450,4 @@ function Write-BnetDiscoveredLayout {
     $path
 }
 
-Export-ModuleMember -Function ConvertTo-BnetLayoutRva,Test-BnetDiscoverySha,Get-BnetDiscoveredLayoutPath,Test-BnetLayoutDefinition,New-BnetLayoutDefinitionFromAnchors,Test-BnetRowsWithReader,Get-BnetGeometryDiscoveryCandidates,Get-BnetGeometryCandidatesFromCounts,Invoke-BnetStructuralDiscovery,Select-BnetDiscoveryCandidate,Read-BnetDiscoveredLayout,Write-BnetDiscoveredLayout
+Export-ModuleMember -Function ConvertTo-BnetLayoutRva,Test-BnetDiscoverySha,Test-BnetTransientLiveValidationReason,Get-BnetCacheValidationDisposition,Get-BnetDiscoveredLayoutPath,Test-BnetLayoutDefinition,New-BnetLayoutDefinitionFromAnchors,Test-BnetRowsWithReader,Get-BnetGeometryDiscoveryCandidates,Get-BnetGeometryCandidatesFromCounts,Invoke-BnetStructuralDiscovery,Select-BnetDiscoveryCandidate,Read-BnetDiscoveredLayout,Write-BnetDiscoveredLayout

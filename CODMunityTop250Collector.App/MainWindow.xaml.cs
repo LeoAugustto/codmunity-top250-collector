@@ -68,6 +68,7 @@ public partial class MainWindow : Window
         currentSnapshot = snapshot;
         var isSyncing = snapshot.CycleStatus == "RUNNING";
         var layoutPending = snapshot.LayoutDiscoveryStatus == "pending" || snapshot.Build == "LayoutDiscoveryPending";
+        var layoutValidationPending = layoutPending && snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING";
         var layoutAmbiguous = snapshot.LayoutDiscoveryStatus == "ambiguous" || snapshot.Build == "LayoutAmbiguous";
         var layoutUnsupported = snapshot.LayoutDiscoveryStatus == "unsupported" || snapshot.Build == "LayoutUnsupported" || snapshot.CycleStatus == "BUILD_ID_UNAVAILABLE";
         var unresolvedLayout = layoutPending || layoutAmbiguous || layoutUnsupported;
@@ -80,6 +81,8 @@ public partial class MainWindow : Window
 
         if (!snapshot.Enabled)
             SetPrimaryStatus("Collector disabled", "Turn it back on in Settings to resume automatic collection.", (MediaBrush)FindResource("Gray"));
+        else if (layoutValidationPending)
+            SetPrimaryStatus("Layout validation pending", "Collector found a compatible layout but is waiting for Call of Duty data to become ready for validation.", (MediaBrush)FindResource("Yellow"));
         else if (layoutPending)
             SetPrimaryStatus("New game build detected", "Waiting for layout discovery. Collection will resume automatically when the layout is validated.", (MediaBrush)FindResource("Yellow"));
         else if (layoutAmbiguous)
