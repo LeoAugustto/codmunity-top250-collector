@@ -12,9 +12,10 @@ $anchors = @{
 }
 $definition = New-BnetLayoutDefinitionFromAnchors -Anchors $anchors -Sha256 $sha -MethodVersion 'fixture-v1'
 Assert-That (Test-BnetLayoutDefinition -Definition $definition -ModuleSize ([Int64]0x20000000)).Valid 'valid candidate rejected'
-foreach ($transientReason in @('LIVE_SAMPLE_ONE_FAILED', 'LIVE_SAMPLE_TWO_FAILED', 'REPEATED_READ_INCONSISTENT', 'MODULE_REGION_UNAVAILABLE')) { Assert-That (Test-BnetTransientLiveValidationReason -Reason $transientReason) "transient live validation reason was rejected: $transientReason" }
+foreach ($transientReason in @('LIVE_SAMPLE_ONE_FAILED', 'LIVE_SAMPLE_TWO_FAILED', 'REPEATED_READ_INCONSISTENT', 'MODULE_REGION_UNAVAILABLE', 'LIVE_VALIDATION_EXCEPTION')) { Assert-That (Test-BnetTransientLiveValidationReason -Reason $transientReason) "transient live validation reason was rejected: $transientReason" }
 foreach ($nonTransientReason in @('CACHE_SCHEMA_OR_SHA_MISMATCH', 'CACHE_STRUCTURAL_METADATA_MISMATCH', 'COUNT_OUT_OF_RANGE')) { Assert-That (-not (Test-BnetTransientLiveValidationReason -Reason $nonTransientReason)) "invalid cache/layout reason was treated as transient: $nonTransientReason" }
 Assert-That ((Get-BnetCacheValidationDisposition -CacheStatus 'OK' -ValidationReason 'LIVE_SAMPLE_ONE_FAILED') -eq 'PENDING') 'valid cache was not retained for transient live validation failure'
+Assert-That ((Get-BnetCacheValidationDisposition -CacheStatus 'OK' -ValidationReason 'LIVE_VALIDATION_EXCEPTION') -eq 'PENDING') 'live validation exception did not remain fail-closed pending'
 Assert-That ((Get-BnetCacheValidationDisposition -CacheStatus 'OK' -ValidationReason 'CACHE_STRUCTURAL_METADATA_MISMATCH') -eq 'REJECTED') 'structurally invalid cache was retained'
 Assert-That ((Select-BnetDiscoveryCandidate -Candidates @([pscustomobject]@{ Valid=$true; Definition=$definition; MethodVersion='fixture-v1' })).Status -eq 'SINGLE') 'single valid candidate not accepted'
 Assert-That ((Select-BnetDiscoveryCandidate -Candidates @([pscustomobject]@{ Valid=$true; Definition=$definition; MethodVersion='fixture-v1' }, [pscustomobject]@{ Valid=$true; Definition=$definition; MethodVersion='fixture-v2' })).Status -eq 'AMBIGUOUS') 'multiple candidates not rejected'

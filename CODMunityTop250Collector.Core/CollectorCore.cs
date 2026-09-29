@@ -137,6 +137,7 @@ public sealed class EngineStatusParser
 public class EngineRunner(AppLogger log)
 {
     public int LayoutValidationRetryAttempt { get; set; } = 1;
+    public string CollectionTrigger { get; set; } = "scheduled";
     public virtual async Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
     {
         var exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -155,6 +156,7 @@ public class EngineRunner(AppLogger log)
         };
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Once", "-InitialDelaySeconds", "0", "-Quiet", "-EmitJson" }) psi.ArgumentList.Add(argument);
         psi.ArgumentList.Add("-LayoutValidationRetryAttempt"); psi.ArgumentList.Add(Math.Max(1, LayoutValidationRetryAttempt).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        psi.ArgumentList.Add("-CollectionTrigger"); psi.ArgumentList.Add(CollectionTrigger is "manual" or "layout-retry" ? CollectionTrigger : "scheduled");
         if (identity is not null)
         {
             psi.ArgumentList.Add("-VerifiedCodPid"); psi.ArgumentList.Add(identity.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -283,12 +285,13 @@ public sealed class CollectorScheduler
             if (pid is null) { if (knownPid is not null) { log.Write("COD_CLOSED"); buildIdentity.Invalidate("process-closed"); } knownPid = null; nextCollectionAtUtc = null; Publish(Snapshot with { Enabled = true, Game = "Closed", CycleStatus = "COD_NOT_RUNNING", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(5), token); continue; }
             if (pid != knownPid) { if (knownPid is not null) buildIdentity.Invalidate("pid-changed"); knownPid = pid; layoutValidationRetryAttempt = 1; log.Write("COD_DETECTED", $"pid={pid}"); Publish(Snapshot with { Enabled = true, Game = "Running", CycleStatus = "WAITING_FOR_GAME", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(30), token); if (monitor.FindSinglePid() != pid) continue; }
             if (updatePreparationRequested) { await Task.Delay(TimeSpan.FromSeconds(1), token); continue; }
-            await RunCycleAsync(pid.Value, token);
+            var trigger = Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" ? "layout-retry" : "scheduled";
+            await RunCycleAsync(pid.Value, token, trigger);
             var retryPendingLayout = Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING";
             var until = DateTimeOffset.UtcNow.Add(GetNextCollectionDelay(Snapshot, layoutValidationRetryAttempt));
             nextCollectionAtUtc = until;
             Publish(Snapshot with { NextCollection = until });
-            if (retryPendingLayout) { log.Write("LAYOUT_VALIDATION_RETRY_SCHEDULED", $"attempt={layoutValidationRetryAttempt + 1} retrySeconds={(int)(until - DateTimeOffset.UtcNow).TotalSeconds}"); layoutValidationRetryAttempt++; }
+            if (retryPendingLayout) { log.Write("LAYOUT_VALIDATION_RETRY_SCHEDULED", $"attempt={layoutValidationRetryAttempt + 1} retrySeconds={(int)(until - DateTimeOffset.UtcNow).TotalSeconds} dueUtc={until:O}"); layoutValidationRetryAttempt++; }
             else layoutValidationRetryAttempt = 1;
             while (DateTimeOffset.UtcNow < until && !token.IsCancellationRequested && monitor.FindSinglePid() == knownPid) await Task.Delay(TimeSpan.FromSeconds(5), token);
         }
@@ -297,20 +300,28 @@ public sealed class CollectorScheduler
     {
         if (!updatePreparationRequested && Settings.CollectorEnabled && monitor.FindSinglePid() is not null)
         {
-            await RunCycleAsync(monitor.FindSinglePid()!.Value, token);
+            if (IsRunningCycle) { log.Write("SYNC_NOW_SKIPPED", "reason=cycle-in-progress"); return; }
+            log.Write("SYNC_NOW_REQUESTED", $"layoutPending={Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING"}");
+            await RunCycleAsync(monitor.FindSinglePid()!.Value, token, "manual");
             if (nextCollectionAtUtc is { } until && until > DateTimeOffset.UtcNow) Publish(Snapshot with { NextCollection = until });
         }
     }
-    private async Task RunCycleAsync(int pid, CancellationToken token)
+    private async Task RunCycleAsync(int pid, CancellationToken token, string trigger = "scheduled")
     {
         if (updatePreparationRequested) return;
-        if (!await cycleLock.WaitAsync(0, token)) return; var started = DateTimeOffset.UtcNow; Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", CycleStartedAt = started, NextCollection = null }); log.Write("CYCLE_START");
+        if (!await cycleLock.WaitAsync(0, token)) { log.Write("CYCLE_SKIPPED", "reason=cycle-in-progress"); return; }
+        var started = DateTimeOffset.UtcNow; Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", CycleStartedAt = started, NextCollection = null }); log.Write("CYCLE_START", $"trigger={trigger}");
         try
         {
             var identity = await buildIdentity.GetOrCreateAsync(monitor.Describe(pid), token);
             engine.LayoutValidationRetryAttempt = layoutValidationRetryAttempt;
+            engine.CollectionTrigger = trigger;
             var result = await engine.RunOnceAsync(engineDir, identity, token);
-            if (string.IsNullOrWhiteSpace(result.StdOut)) throw new InvalidDataException("Engine did not return JSON.");
+            if (string.IsNullOrWhiteSpace(result.StdOut))
+            {
+                log.Write("ENGINE_PROTOCOL_ERROR", $"exitCode={result.ExitCode} stderrPresent={!string.IsNullOrWhiteSpace(result.StdErr)}");
+                throw new InvalidDataException($"Engine did not return JSON. exitCode={result.ExitCode}.");
+            }
             var previous = Snapshot; var parsed = parser.Parse(result.StdOut, true, started);
             if (identity is not null && parsed.CycleStatus is ("OK" or "PARTIAL_READY")) buildIdentity.RememberValidatedLayout(identity, parsed.Layout);
             var snapshot = parsed with { LastSuccess = parsed.CycleStatus is "OK" or "PARTIAL_READY" ? DateTimeOffset.UtcNow : previous.LastSuccess, CycleStartedAt = null, Mp = PreserveLastValid(parsed.Mp, previous.Mp), Br = PreserveLastValid(parsed.Br, previous.Br), Resurgence = PreserveLastValid(parsed.Resurgence, previous.Resurgence) };

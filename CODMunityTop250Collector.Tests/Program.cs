@@ -45,6 +45,7 @@ try
     StartupRegistrationTests();
     StationWatcherTests().GetAwaiter().GetResult();
     SchedulerTransientLayoutValidationTests(log).GetAwaiter().GetResult();
+    SyncNowSerializationTests(log).GetAwaiter().GetResult();
     SafeModeNativeDialogContractTests();
     LayoutDiscoveryContractTests();
     LayoutEvidenceCaptureContractTests();
@@ -696,8 +697,27 @@ static async Task SchedulerTransientLayoutValidationTests(AppLogger log)
     if (CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(30)) throw new Exception("pending layout did not select the short retry cadence");
 
     await scheduler.SyncNowAsync(CancellationToken.None);
-    if (runner.RunCount != 2 || scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.LayoutDiscoveryStatus != "resolved" || CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(300)) throw new Exception("later layout validation success did not resume normal collection");
-    if (runner.Identities.Count != 2 || runner.Identities.Any(identity => identity?.Sha256 != sha)) throw new Exception("transient layout retry changed the verified game process identity");
+    if (runner.RunCount != 2 || scheduler.Snapshot.CycleStatus != "LAYOUT_VALIDATION_PENDING" || scheduler.Snapshot.LayoutDiscoveryStatus != "pending") throw new Exception("second transient cache validation was not kept pending");
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (runner.RunCount != 3 || scheduler.Snapshot.CycleStatus != "OK" || scheduler.Snapshot.LayoutDiscoveryStatus != "resolved" || CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(300)) throw new Exception("later layout validation success did not resume normal collection");
+    if (runner.Identities.Count != 3 || runner.Identities.Any(identity => identity?.Sha256 != sha)) throw new Exception("transient layout retry changed the verified game process identity");
+}
+
+static async Task SyncNowSerializationTests(AppLogger log)
+{
+    const string sha = "FEDCBA0987654321FEDCBA0987654321FEDCBA0987654321FEDCBA0987654321";
+    var monitor = new FakeCodProcessMonitor(new CodProcessDescriptor(6790, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch));
+    var runner = new BlockingEngineRunner(log);
+    using var api = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
+    var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(sha), log));
+    var first = scheduler.SyncNowAsync(CancellationToken.None);
+    await runner.Started.Task.WaitAsync(CancellationToken.None);
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (runner.RunCount != 1) throw new Exception("Sync now created a parallel pending validation cycle");
+    runner.Release.TrySetResult();
+    await first;
+    var content = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
+    if (!content.Contains("SYNC_NOW_REQUESTED", StringComparison.Ordinal) || !content.Contains("SYNC_NOW_SKIPPED reason=cycle-in-progress", StringComparison.Ordinal)) throw new Exception("Sync now pending-cycle observability");
 }
 
 static async Task SchedulerApiPriorityTests(AppLogger log)
@@ -1039,10 +1059,23 @@ sealed class TransientLayoutValidationEngineRunner(AppLogger log) : EngineRunner
     {
         Identities.Add(identity); RunCount++;
         var capturedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-        var json = RunCount == 1
+        var json = RunCount <= 2
             ? $"{{\"capturedAt\":\"{capturedAt}\",\"platform\":\"battlenet\",\"layout\":\"bnet-cached\",\"layoutDiscoveryStatus\":\"pending\",\"cycleStatus\":\"LAYOUT_VALIDATION_PENDING\",\"datasets\":{{}}}}"
             : $"{{\"capturedAt\":\"{capturedAt}\",\"platform\":\"battlenet\",\"layout\":\"bnet-cached\",\"layoutDiscoveryStatus\":\"resolved\",\"cycleStatus\":\"OK\",\"datasets\":{{\"mp\":{{\"status\":\"WAITING\"}},\"br\":{{\"status\":\"WAITING\"}},\"resurgence\":{{\"status\":\"WAITING\"}}}}}}";
         return Task.FromResult((0, json, string.Empty));
+    }
+}
+
+sealed class BlockingEngineRunner(AppLogger log) : EngineRunner(log)
+{
+    public int RunCount { get; private set; }
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public override async Task<(int ExitCode, string StdOut, string StdErr)> RunOnceAsync(string engineDirectory, VerifiedBuildIdentity? identity, CancellationToken token)
+    {
+        RunCount++; Started.TrySetResult(); await Release.Task.WaitAsync(token);
+        var capturedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        return (0, $"{{\"capturedAt\":\"{capturedAt}\",\"platform\":\"battlenet\",\"layout\":\"bnet-cached\",\"layoutDiscoveryStatus\":\"resolved\",\"cycleStatus\":\"OK\",\"datasets\":{{\"mp\":{{\"status\":\"WAITING\"}},\"br\":{{\"status\":\"WAITING\"}},\"resurgence\":{{\"status\":\"WAITING\"}}}}}}", string.Empty);
     }
 }
 

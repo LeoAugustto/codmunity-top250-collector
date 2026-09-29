@@ -9,7 +9,7 @@ $script:KnownModeBlockSpacing = 0x820F0
 
 function Test-BnetTransientLiveValidationReason {
     param([string]$Reason)
-    return $Reason -in @('LIVE_SAMPLE_ONE_FAILED', 'LIVE_SAMPLE_TWO_FAILED', 'REPEATED_READ_INCONSISTENT', 'MODULE_REGION_UNAVAILABLE')
+    return $Reason -in @('LIVE_SAMPLE_ONE_FAILED', 'LIVE_SAMPLE_TWO_FAILED', 'REPEATED_READ_INCONSISTENT', 'MODULE_REGION_UNAVAILABLE', 'LIVE_VALIDATION_EXCEPTION')
 }
 
 function Get-BnetCacheValidationDisposition {
