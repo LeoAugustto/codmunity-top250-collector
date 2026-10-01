@@ -12,25 +12,33 @@ using Forms = System.Windows.Forms;
 namespace CODMunityTop250Collector.App;
 public partial class App : System.Windows.Application
 {
-    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private Forms.ToolStripMenuItem? trayCollectorEnabled; private Forms.ToolStripMenuItem? trayWatcher; private Forms.ToolStripMenuItem? trayStartup; private bool updatingTraySettings; private CollectorScheduler? scheduler; private StationWatcher? watcher; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private StartupSettingsApplier? startupSettings; private AppLogger? log; private PrivateUpdateClient? updater; private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new();
+    private Mutex? mutex; private EventWaitHandle? showEvent; private CancellationTokenSource? cts; private MainWindow? window; private Forms.NotifyIcon? tray; private Forms.ToolStripMenuItem? trayCollectorEnabled; private Forms.ToolStripMenuItem? trayWatcher; private Forms.ToolStripMenuItem? trayStartup; private bool updatingTraySettings; private CollectorScheduler? scheduler; private StationWatcher? watcher; private SettingsStore? settingsStore; private CollectorSettings settings = new(); private StartupSettingsApplier? startupSettings; private AppLogger? log; private PrivateUpdateClient? updater; private ResourceTelemetry? resourceTelemetry; private readonly SingleInstanceLifetime instanceLifetime = new(); private readonly AutomaticUpdateCoordinator automaticUpdate = new(); private readonly UpdateOperationGate updateOperation = new(); private int shutdownStarted;
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        InstallCrashDiagnostics();
         try
         {
             mutex = new Mutex(true, "Local\\CODMunityTop250Collector", out var first);
+            instanceLifetime.SetOwnership(first);
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\CODMunityTop250Collector.Show");
-            if (!first) { showEvent.Set(); Shutdown(); return; }
+            if (!first)
+            {
+                showEvent.Set();
+                showEvent.Dispose(); showEvent = null;
+                mutex.Dispose(); mutex = null;
+                Shutdown(); return;
+            }
             try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
-            log = new AppLogger(); log.Write("APP_START", $"runtimeVersion={Environment.Version} frameworkDescription=\"{RuntimeInformation.FrameworkDescription}\" osDescription=\"{RuntimeInformation.OSDescription}\" processArchitecture={RuntimeInformation.ProcessArchitecture}"); settingsStore = new SettingsStore(log); settings = settingsStore.Load(); startupSettings = new StartupSettingsApplier(new WindowsStartupRegistration()); ReconcileStartupRegistration(onStartup: true);
+            log = new AppLogger(); log.Write("APP_START", $"runtimeVersion={Environment.Version} frameworkDescription=\"{RuntimeInformation.FrameworkDescription}\" osDescription=\"{RuntimeInformation.OSDescription}\" processArchitecture={RuntimeInformation.ProcessArchitecture}"); resourceTelemetry = new ResourceTelemetry(new WindowsSystemResourceProvider(), log); resourceTelemetry.Sample("startup"); settingsStore = new SettingsStore(log); settings = settingsStore.Load(); startupSettings = new StartupSettingsApplier(new WindowsStartupRegistration()); ReconcileStartupRegistration(onStartup: true);
             var rankedApi = new RankedPlayersApiClient(new CompositeApiTokenProvider(new EnvironmentApiTokenProvider(), new EmbeddedRankedSyncTokenProvider()), log);
-            scheduler = new CollectorScheduler(new CodProcessMonitor(), new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine")); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
+            scheduler = new CollectorScheduler(new CodProcessMonitor(), new EngineRunner(log), new EngineStatusParser(), rankedApi, log, Path.Combine(AppContext.BaseDirectory, "engine"), resources: resourceTelemetry); scheduler.UpdateSettings(settings); scheduler.Changed += s => Dispatcher.Invoke(() => { window?.Update(s); UpdateTray(s); });
             window = new MainWindow(this); window.SetVersion(AppVersion.Display); window.SetSettings(settings); CreateTray(); cts = new CancellationTokenSource(); watcher = new StationWatcher(() => settings, () => scheduler?.Snapshot ?? new CollectorSnapshot(settings.CollectorEnabled), new WindowsStationWatcherPlatform((evt, detail) => log?.Write(evt, detail)), (evt, detail) => log?.Write(evt, detail));
             var publicKey = EmbeddedUpdateKey.LoadSubjectPublicKeyInfo();
             try { updater = new PrivateUpdateClient(publicKey, (evt, detail) => log?.Write(evt, detail)); }
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(publicKey); }
-            _ = scheduler.RunAsync(cts.Token); _ = watcher.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token);
-            _ = Task.Run(async () => { while (!cts.IsCancellationRequested) { showEvent.WaitOne(); await Dispatcher.InvokeAsync(ShowWindow); } });
+            _ = scheduler.RunAsync(cts.Token); _ = watcher.RunAsync(cts.Token); _ = RunUpdateChecksAsync(cts.Token); _ = resourceTelemetry.RunPeriodicAsync(cts.Token);
+            _ = Task.Run(() => ListenForShowEventAsync(cts.Token));
         }
         catch (Exception ex)
         {
@@ -38,6 +46,31 @@ public partial class App : System.Windows.Application
             try { System.Windows.MessageBox.Show("CODMunity Top 250 Collector could not start. The error was recorded in the logs.", "CODMunity Top 250 Collector", MessageBoxButton.OK, MessageBoxImage.Error); } catch { }
             Shutdown(-1);
         }
+    }
+    private async Task ListenForShowEventAsync(CancellationToken token)
+    {
+        var signal = showEvent;
+        if (signal is null) return;
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var result = WaitHandle.WaitAny([signal, token.WaitHandle]);
+                if (result != 0 || token.IsCancellationRequested) break;
+                await Dispatcher.InvokeAsync(ShowWindow);
+            }
+        }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested) { }
+    }
+    private void InstallCrashDiagnostics()
+    {
+        AppDomain.CurrentDomain.UnhandledException += (_, args) => LogCrashEvent("APPDOMAIN_UNHANDLED_EXCEPTION", args.ExceptionObject as Exception, args.IsTerminating);
+        DispatcherUnhandledException += (_, args) => LogCrashEvent("DISPATCHER_UNHANDLED_EXCEPTION", args.Exception, false);
+        TaskScheduler.UnobservedTaskException += (_, args) => LogCrashEvent("TASK_UNOBSERVED_EXCEPTION", args.Exception, false);
+    }
+    private void LogCrashEvent(string source, Exception? exception, bool terminating)
+    {
+        try { (log ??= new AppLogger()).Write(source, $"type={exception?.GetType().Name ?? "Unknown"} hresult=0x{(exception?.HResult ?? 0):X8} terminating={terminating}"); } catch { }
     }
     private void CreateTray()
     {
@@ -118,6 +151,7 @@ public partial class App : System.Windows.Application
     private async Task<bool> BeginAutomaticUpdateAsync(AvailableUpdate update, CancellationToken token)
     {
         if (updater is null || scheduler is null) return false;
+        resourceTelemetry?.Sample("pre-update-handoff");
         var outcome = await automaticUpdate.RunAsync(update,
             (candidate, cancellation) => updater.DownloadMsiAsync(candidate, Path.Combine(CollectorPaths.Root, "updates"), cancellation),
             scheduler.RequestUpdatePreparation,
@@ -247,10 +281,20 @@ public partial class App : System.Windows.Application
         tray.Text = !snapshot.Enabled ? "CODMunity Collector | Collector disabled"
             : snapshot.Game != "Running" ? "CODMunity Collector | Waiting for Call of Duty"
             : snapshot.CycleStatus == "RUNNING" ? "CODMunity Collector | Syncing..."
+            : snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE" ? "CODMunity Collector | Waiting for system resources"
             : snapshot.LastSuccess is null ? "CODMunity Collector | COD running | Waiting for sync"
             : $"CODMunity Collector | COD running | Last sync {snapshot.LastSuccess.Value.ToLocalTime():HH:mm}";
     }
-    protected override void OnExit(ExitEventArgs e) { cts?.Cancel(); updater?.Dispose(); tray?.Dispose(); log?.Write("APP_EXIT"); mutex?.ReleaseMutex(); mutex?.Dispose(); showEvent?.Dispose(); base.OnExit(e); }
+    protected override void OnExit(ExitEventArgs e)
+    {
+        if (Interlocked.Exchange(ref shutdownStarted, 1) != 0) { base.OnExit(e); return; }
+        cts?.Cancel();
+        try { showEvent?.Set(); } catch (ObjectDisposedException) { }
+        updater?.Dispose(); tray?.Dispose(); log?.Write("APP_EXIT");
+        instanceLifetime.ReleaseIfOwned(() => mutex!.ReleaseMutex());
+        mutex?.Dispose(); showEvent?.Dispose(); cts?.Dispose();
+        base.OnExit(e);
+    }
 }
 internal static class AppVersion
 {

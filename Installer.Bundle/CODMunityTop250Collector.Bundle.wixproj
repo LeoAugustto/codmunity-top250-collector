@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>Bundle</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
-    <OutputName>CODMunityTop250Collector-0.1.26-alpha-Setup</OutputName>
+    <OutputName>CODMunityTop250Collector-0.1.27-alpha-Setup</OutputName>
     <OutputPath>$(MSBuildProjectDirectory)\..\dist\setup\</OutputPath>
   </PropertyGroup>
   <ItemGroup>

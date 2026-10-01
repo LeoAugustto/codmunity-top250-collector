@@ -31,8 +31,8 @@ try
     File.WriteAllText(CollectorPaths.Settings, "{bad json"); if (store.Load() != new CollectorSettings()) throw new Exception("corrupt settings recovery"); if (!Directory.EnumerateFiles(root, "settings.corrupt.*.json").Any()) throw new Exception("corrupt backup");
     var json = "{\"capturedAt\":\"2026-01-01T00:00:00Z\",\"platform\":\"steam\",\"layout\":\"steam-current\",\"cycleStatus\":\"OK\",\"codSha256\":\"test-build-sha\",\"datasets\":{\"mp\":{\"status\":\"OK\",\"rows\":250},\"br\":{\"status\":\"NOT_READY\"},\"resurgence\":{\"status\":\"OK\",\"rows\":250}}}";
     var snapshot = parser.Parse(json, true, DateTimeOffset.Parse("2025-12-31T23:59:59Z")); if (snapshot.Platform != "steam" || snapshot.Mp?.Players != 250 || snapshot.Br?.Status != "NOT_READY" || snapshot.BuildIdentity != "test-build-sha") throw new Exception("status parsing");
-    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.26-alpha", "8.0.30", ".NET 8.0.30", "Microsoft Windows", "X64");
-    if (!supportInfo.Contains("collectorVersion=0.1.26-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.30", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("layoutDiscoveryStatus=resolved", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
+    var supportInfo = CollectorSupportInfo.Format(snapshot, "0.1.27-alpha", "8.0.31", ".NET 8.0.31", "Microsoft Windows", "X64");
+    if (!supportInfo.Contains("collectorVersion=0.1.27-alpha", StringComparison.Ordinal) || !supportInfo.Contains("runtimeVersion=8.0.31", StringComparison.Ordinal) || !supportInfo.Contains("gameBuildIdentity=test-build-sha", StringComparison.Ordinal) || !supportInfo.Contains("layoutDiscoveryStatus=resolved", StringComparison.Ordinal) || !supportInfo.Contains("lastCollectionResult=OK", StringComparison.Ordinal) || !supportInfo.Contains("lastApiSyncResult=resurgence:NotConfigured", StringComparison.Ordinal)) throw new Exception("support build info fields");
     LayoutDiscoveryUiStateTests(parser);
     var info = parser.CopyBuildInfo("{\"platform\":\"xbox\",\"runtimeBuildId\":\"pe64-test\"}", "0.1.0-alpha"); if (info.Contains(Environment.UserName) || !info.Contains("runtimeBuildId=pe64-test")) throw new Exception("build info sanitization");
     var localHydratedTime = DateTimeOffset.Parse("2026-01-01T00:00:03Z").ToLocalTime();
@@ -43,6 +43,8 @@ try
     var ptBrCard = localHydratedTime.ToString("g", ptBr);
     if (!ptBrStatus.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrStatus.Contains(localHydratedTime.ToString("T", ptBr)) || !enUsStatus.Contains(localHydratedTime.ToString("d", enUs)) || !enUsStatus.Contains(localHydratedTime.ToString("T", enUs)) || !ptBrCard.Contains(localHydratedTime.ToString("d", ptBr)) || !ptBrCard.Contains(localHydratedTime.ToString("t", ptBr))) throw new Exception("localized timestamp formatting");
     StartupRegistrationTests();
+    SingleInstanceLifetimeTests();
+    ResourcePressureTests(log).GetAwaiter().GetResult();
     StationWatcherTests().GetAwaiter().GetResult();
     SchedulerTransientLayoutValidationTests(log).GetAwaiter().GetResult();
     SyncNowSerializationTests(log).GetAwaiter().GetResult();
@@ -230,6 +232,43 @@ static async Task StationWatcherTests()
         await unsupportedWatcher.EvaluateOnceAsync(CancellationToken.None);
         if (unsupportedWatcher.Snapshot.State != StationWatcherState.LayoutUnsupported || unsupportedPlatform.CloseCalls != 0 || unsupportedPlatform.LaunchCalls != 0) throw new Exception("unresolved layout caused Watcher recovery: " + unresolvedCycleStatus);
     }
+    var resourcePlatform = new FakeStationWatcherPlatform { Cod = new StationCodProcess(802, now.AddMinutes(-30)), InternetAvailable = true };
+    var resourceSnapshot = new CollectorSnapshot(true, Game: "Running", LastSuccess: now.AddMinutes(-11), CycleStatus: "SYSTEM_RESOURCE_PRESSURE");
+    var resourceWatcher = new StationWatcher(() => settings, () => resourceSnapshot, resourcePlatform, (_, _) => { }, () => now, config);
+    await resourceWatcher.EvaluateOnceAsync(CancellationToken.None);
+    if (resourceWatcher.Snapshot.State != StationWatcherState.CollectionDeferred || resourcePlatform.CloseCalls != 0 || resourcePlatform.LaunchCalls != 0) throw new Exception("resource pressure caused Watcher recovery");
+}
+static void SingleInstanceLifetimeTests()
+{
+    var first = new SingleInstanceLifetime(); first.SetOwnership(true);
+    var releases = 0;
+    if (!first.OwnsMutex || !first.ReleaseIfOwned(() => releases++) || first.ReleaseIfOwned(() => releases++) || releases != 1) throw new Exception("owning instance mutex release lifecycle");
+    var second = new SingleInstanceLifetime(); second.SetOwnership(false);
+    if (second.OwnsMutex || second.ReleaseIfOwned(() => releases++) || releases != 1) throw new Exception("secondary instance released a mutex it did not own");
+}
+static async Task ResourcePressureTests(AppLogger log)
+{
+    static SystemResourceSnapshot Sample(long usedGiB, long limitGiB, long availableGiB = 4) => new(usedGiB * 1024L * 1024 * 1024, limitGiB * 1024L * 1024 * 1024, 16L * 1024 * 1024 * 1024, availableGiB * 1024L * 1024 * 1024, 100, 200, 300, 4, 5, 6);
+    if (ResourcePressurePolicy.Evaluate(Sample(8, 10)) != ResourcePressureLevel.Normal) throw new Exception("normal resource pressure classification");
+    if (ResourcePressurePolicy.Evaluate(Sample(91, 100)) != ResourcePressureLevel.Warning) throw new Exception("warning resource pressure classification");
+    if (ResourcePressurePolicy.Evaluate(Sample(95, 100)) != ResourcePressureLevel.Critical || ResourcePressurePolicy.Evaluate(Sample(19, 20)) != ResourcePressureLevel.Critical) throw new Exception("critical resource pressure classification");
+    var provider = new FakeResourceProvider(Sample(19, 20));
+    var telemetry = new ResourceTelemetry(provider, log);
+    const string sha = "1111111111111111111111111111111111111111111111111111111111111111";
+    var monitor = new FakeCodProcessMonitor(new CodProcessDescriptor(9001, @"C:\Games\Call of Duty\_retail_\cod.exe", "battlenet", 200, DateTime.UnixEpoch));
+    var runner = new FakeEngineRunner(log);
+    using var api = new RankedPlayersApiClient(new StaticTokenProvider(null), log, new RecordingHandler([HttpStatusCode.OK]));
+    var scheduler = new CollectorScheduler(monitor, runner, new EngineStatusParser(), api, log, AppContext.BaseDirectory, new BuildIdentityCache(new CountingBuildHasher(sha), log), telemetry);
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (runner.Identities.Count != 0 || scheduler.Snapshot.CycleStatus != "SYSTEM_RESOURCE_PRESSURE" || CollectorScheduler.GetNextCollectionDelay(scheduler.Snapshot) != TimeSpan.FromSeconds(60)) throw new Exception("critical resource pressure started engine or missed retry cadence");
+    provider.Snapshot = Sample(8, 10);
+    await scheduler.SyncNowAsync(CancellationToken.None);
+    if (runner.Identities.Count != 1 || scheduler.Snapshot.CycleStatus != "OK") throw new Exception("resource recovery did not resume collection");
+    var content = File.ReadAllText(Path.Combine(CollectorPaths.Logs, "app.log"));
+    if (!content.Contains("SYNC_NOW_SKIPPED reason=system-resource-pressure", StringComparison.Ordinal) || !content.Contains("RESOURCE_PRESSURE_PROCESS", StringComparison.Ordinal)) throw new Exception("resource pressure observability");
+    provider.ThrowOnConsumers = true;
+    provider.Snapshot = Sample(19, 20);
+    telemetry.Sample("top-process-access-race");
 }
 static void LayoutDiscoveryUiStateTests(EngineStatusParser parser)
 {
@@ -450,6 +489,10 @@ static void InstallerLaunchContractTests()
     if (!bundle.Contains("LaunchTarget=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\\CODMunityTop250Collector.exe\"", StringComparison.Ordinal) ||
         !bundle.Contains("LaunchWorkingFolder=\"[LocalAppDataFolder]Programs\\CODMunity Top 250 Collector\"", StringComparison.Ordinal) ||
         !bundle.Contains("<MsiPackage Id=\"CODMunityTop250CollectorMsi\"", StringComparison.Ordinal) || !bundle.Contains("Visible=\"no\"", StringComparison.Ordinal)) throw new Exception("Setup bundle registration contract");
+    if (!bundle.Contains("DetectCondition=\"DOTNET_DESKTOP_RUNTIME_8_X64 &gt;= v8.0.31\"", StringComparison.Ordinal) ||
+        !bundle.Contains("windowsdesktop-runtime-8.0.31-win-x64.exe", StringComparison.Ordinal) ||
+        !bundle.Contains("605189223CF0A64BFB5453520B794D1D386A97C7E65E3944FEAF9214DB1A8B247F66C569265AEF4204447BAF5B5FF19559C323D887E1318F17DEB28A5AF0FA12", StringComparison.Ordinal) ||
+        !msi.Contains("Version=\"8.0.31\"", StringComparison.Ordinal)) throw new Exception(".NET Desktop Runtime 8.0.31 baseline contract");
 }
 
 static void StartupRegistrationTests()
@@ -1037,6 +1080,15 @@ sealed class FakeCodProcessMonitor(CodProcessDescriptor descriptor) : CodProcess
 {
     public override int? FindSinglePid() => descriptor.Pid;
     public override CodProcessDescriptor? Describe(int pid) => pid == descriptor.Pid ? descriptor : null;
+}
+
+sealed class FakeResourceProvider(SystemResourceSnapshot snapshot) : ISystemResourceProvider
+{
+    public SystemResourceSnapshot Snapshot { get; set; } = snapshot;
+    public IReadOnlyList<ResourceConsumer> Consumers { get; set; } = [new("fixture", 1, 1024, 512)];
+    public bool ThrowOnConsumers { get; set; }
+    public SystemResourceSnapshot Capture() => Snapshot;
+    public IReadOnlyList<ResourceConsumer> GetTopPrivateMemoryConsumers(int count) => ThrowOnConsumers ? throw new InvalidOperationException("synthetic process exit") : Consumers.Take(count).ToArray();
 }
 
 sealed class FakeEngineRunner(AppLogger log) : EngineRunner(log)

@@ -3,7 +3,7 @@
      xmlns:netfx="http://wixtoolset.org/schemas/v4/wxs/netfx">
   <Bundle Name="CODMunity Top 250 Collector"
           Manufacturer="CODMunity"
-        Version="0.1.26"
+        Version="0.1.27"
           UpgradeCode="{4D7781F4-570A-42A4-9378-F1D97C01B4C3}"
           IconSourceFile="$(var.ProjectDir)..\CODMunityTop250Collector.App\Assets\codmunity-logo.ico">
     <BootstrapperApplication>
@@ -26,7 +26,7 @@
       <ExePackage Id="DotNetDesktopRuntime8X64Package"
                   DisplayName="Microsoft .NET 8 Desktop Runtime (x64)"
                   Description="Required to run CODMunity Top 250 Collector."
-                  DetectCondition="DOTNET_DESKTOP_RUNTIME_8_X64"
+                  DetectCondition="DOTNET_DESKTOP_RUNTIME_8_X64 &gt;= v8.0.31"
                   InstallArguments="/install /quiet /norestart"
                   RepairArguments="/repair /quiet /norestart"
                   PerMachine="yes"
@@ -35,15 +35,15 @@
                   Protocol="burn"
                   Vital="yes">
         <ExePackagePayload Id="DotNetDesktopRuntime8X64Payload"
-                           Name="windowsdesktop-runtime-8.0.29-win-x64.exe"
-                           DownloadUrl="https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.29/windowsdesktop-runtime-8.0.29-win-x64.exe"
-                           Hash="02D272EE678F5BC8BE522B0B8ADAF2A3C9D35D1044D7737EA48E477928A839AD5344724B242B210AFDC64775D8CF43655DB58396FCF53DD185E23BA2B888EC44"
-                           Size="58699856"
-                           Version="8.0.29"
+                           Name="windowsdesktop-runtime-8.0.31-win-x64.exe"
+                           DownloadUrl="https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.31/windowsdesktop-runtime-8.0.31-win-x64.exe"
+                           Hash="605189223CF0A64BFB5453520B794D1D386A97C7E65E3944FEAF9214DB1A8B247F66C569265AEF4204447BAF5B5FF19559C323D887E1318F17DEB28A5AF0FA12"
+                           Size="58715896"
+                           Version="8.0.31"
                            ProductName="Microsoft .NET 8 Desktop Runtime (x64)" />
       </ExePackage>
       <MsiPackage Id="CODMunityTop250CollectorMsi"
-                  SourceFile="$(var.ProjectDir)..\dist\msi\CODMunityTop250Collector-0.1.26-alpha-win-x64.msi"
+                  SourceFile="$(var.ProjectDir)..\dist\msi\CODMunityTop250Collector-0.1.27-alpha-win-x64.msi"
                   Vital="yes"
                   Visible="no" />
     </Chain>

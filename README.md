@@ -7,7 +7,7 @@ The application reads the supported local game layouts, keeps the active leaderb
 ## Requirements
 
 - Windows 10/11 x64
-- .NET 8 SDK for development; Microsoft .NET 8 Desktop Runtime x64 for framework-dependent builds
+- .NET 8 SDK for development; Microsoft .NET 8 Desktop Runtime x64 8.0.31 or newer compatible servicing patch for framework-dependent builds
 - Windows PowerShell 5.1 for the bundled engine
 - WiX Toolset dependencies restored through the solution for MSI/Bundle builds
 - Git and GitHub CLI (`gh`) for source backup and GitHub release mirroring
@@ -57,11 +57,11 @@ The MSI is an internal package for the signed automatic-update flow (`manifest` 
 
 ### Same-version development validation
 
-Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.26-alpha over an already installed 0.1.26-alpha in place.
+Windows Installer can preserve files when reinstalling a rebuilt package with the same product/file versions. For a local validation rebuild, do not install 0.1.27-alpha over an already installed 0.1.27-alpha in place.
 
 After generating the portable, MSI, and Setup artifacts, close the Collector and run:
 
-    .\tools\validate-local-install.ps1 -Version '0.1.26-alpha' -ReplaceAndValidate
+    .\tools\validate-local-install.ps1 -Version '0.1.27-alpha' -ReplaceAndValidate
 
 The helper performs a clean registered Setup uninstall, opens the normal interactive Setup install, then SHA-256 compares every portable payload file with its installed counterpart. It fails if any installed file is stale, missing, or differs. This workflow is for same-version development validation only; normal releases and the signed MSI updater flow are unchanged.
 
@@ -73,6 +73,10 @@ Known executable SHA-256 values always use their versioned official layout. For 
 Compatible layout relocations can now be recovered automatically; this is not a guarantee that every future game update will be supported. Missing, ambiguous, timed-out, and semantically invalid discoveries remain unsupported.
 
 See [Battle.net layout evidence workflow](docs/BATTLE-NET-LAYOUT-EVIDENCE.md) for the static baseline capture and next-update procedure.
+
+### Resource-pressure telemetry
+
+The Collector writes local `RESOURCE_SAMPLE` records at startup, about every five minutes, and around every collection cycle. Under critical Windows commit pressure it defers extraction for 60 seconds without restarting COD or Battle.net, preserves the last valid snapshot, and records a privacy-safe top-five process memory snapshot once when entering that state. See [the 0.1.27 soak procedure](docs/RESOURCE-SOAK-TEST.md).
 ## Release flow
 
 1. Build and validate locally.
@@ -80,7 +84,7 @@ See [Battle.net layout evidence workflow](docs/BATTLE-NET-LAYOUT-EVIDENCE.md) fo
 3. Mirror the validated source, tag, and release assets to this private GitHub repository:
 
 ```powershell
-.\tools\publish-github-release.ps1 -Version "0.1.26-alpha"
+.\tools\publish-github-release.ps1 -Version "0.1.27-alpha"
 ```
 
 The GitHub helper requires `LeoAugustto/codmunity-top250-collector` to be `PRIVATE`, uploads the MSI, Setup, portable ZIP, `manifest.json`, `manifest.sig`, and `SHA256SUMS.txt`, and always treats `manifest.json` as an existing OCI announcement artifact rather than an updater publication action.

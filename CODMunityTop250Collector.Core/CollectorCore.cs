@@ -166,9 +166,27 @@ public class EngineRunner(AppLogger log)
             if (!string.IsNullOrWhiteSpace(identity.Layout)) { psi.ArgumentList.Add("-VerifiedLayout"); psi.ArgumentList.Add(identity.Layout); }
         }
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("PowerShell engine did not start.");
+        var started = Stopwatch.GetTimestamp();
+        log.Write("ENGINE_PROCESS_START", $"pid={process.Id}");
         try { process.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
-        var output = process.StandardOutput.ReadToEndAsync(token); var error = process.StandardError.ReadToEndAsync(token); await process.WaitForExitAsync(token);
-        return (process.ExitCode, await output, await error);
+        try
+        {
+            var output = process.StandardOutput.ReadToEndAsync(token); var error = process.StandardError.ReadToEndAsync(token); await process.WaitForExitAsync(token);
+            string memoryDetail;
+            try
+            {
+                process.Refresh();
+                memoryDetail = $" peakWorkingSetMb={(process.PeakWorkingSet64 / (1024d * 1024d)).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} finalPrivateMb={(process.PrivateMemorySize64 / (1024d * 1024d)).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}";
+            }
+            catch (Exception ex) { memoryDetail = " memoryMetrics=unavailable type=" + ex.GetType().Name; }
+            log.Write("ENGINE_PROCESS_EXIT", $"pid={process.Id} exitCode={process.ExitCode} durationMs={(long)Stopwatch.GetElapsedTime(started).TotalMilliseconds}{memoryDetail}");
+            return (process.ExitCode, await output, await error);
+        }
+        catch
+        {
+            log.Write("ENGINE_PROCESS_EXIT", $"pid={process.Id} exitCode=unavailable durationMs={(long)Stopwatch.GetElapsedTime(started).TotalMilliseconds}");
+            throw;
+        }
     }
 }
 
@@ -270,11 +288,12 @@ public class CodProcessMonitor
 public sealed class CollectorScheduler
 {
     private static readonly TimeSpan LayoutValidationRetryDelay = TimeSpan.FromSeconds(30);
-    private readonly CodProcessMonitor monitor; private readonly EngineRunner engine; private readonly EngineStatusParser parser; private readonly RankedPlayersApiClient api; private readonly AppLogger log; private readonly string engineDir; private readonly BuildIdentityCache buildIdentity; private readonly SemaphoreSlim cycleLock = new(1, 1); private DateTimeOffset? nextCollectionAtUtc; private int layoutValidationRetryAttempt = 1; private volatile bool updatePreparationRequested;
+    private static readonly TimeSpan ResourcePressureRetryDelay = TimeSpan.FromSeconds(60);
+    private readonly CodProcessMonitor monitor; private readonly EngineRunner engine; private readonly EngineStatusParser parser; private readonly RankedPlayersApiClient api; private readonly AppLogger log; private readonly string engineDir; private readonly BuildIdentityCache buildIdentity; private readonly ResourceTelemetry resources; private readonly SemaphoreSlim cycleLock = new(1, 1); private DateTimeOffset? nextCollectionAtUtc; private int layoutValidationRetryAttempt = 1; private volatile bool updatePreparationRequested;
     public event Action<CollectorSnapshot>? Changed; public CollectorSettings Settings { get; private set; } = new(); public CollectorSnapshot Snapshot { get; private set; } = new(true); public bool IsRunningCycle => cycleLock.CurrentCount == 0;
-    public CollectorScheduler(CodProcessMonitor monitor, EngineRunner engine, EngineStatusParser parser, RankedPlayersApiClient api, AppLogger log, string engineDir, BuildIdentityCache? buildIdentity = null) { this.monitor = monitor; this.engine = engine; this.parser = parser; this.api = api; this.log = log; this.engineDir = engineDir; this.buildIdentity = buildIdentity ?? new BuildIdentityCache(new FileBuildHasher(), log); }
+    public CollectorScheduler(CodProcessMonitor monitor, EngineRunner engine, EngineStatusParser parser, RankedPlayersApiClient api, AppLogger log, string engineDir, BuildIdentityCache? buildIdentity = null, ResourceTelemetry? resources = null) { this.monitor = monitor; this.engine = engine; this.parser = parser; this.api = api; this.log = log; this.engineDir = engineDir; this.buildIdentity = buildIdentity ?? new BuildIdentityCache(new FileBuildHasher(), log); this.resources = resources ?? new ResourceTelemetry(new WindowsSystemResourceProvider(), log); }
     public void UpdateSettings(CollectorSettings settings) { Settings = settings.Normalized(); Publish(Snapshot with { Enabled = Settings.CollectorEnabled }); log.Write(Settings.CollectorEnabled ? "COLLECTOR_ENABLED" : "COLLECTOR_DISABLED"); }
-    public static TimeSpan GetNextCollectionDelay(CollectorSnapshot snapshot, int layoutValidationRetryAttempt = 1) => snapshot.LayoutDiscoveryStatus == "pending" && snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" && layoutValidationRetryAttempt <= 10 ? LayoutValidationRetryDelay : TimeSpan.FromSeconds(300);
+    public static TimeSpan GetNextCollectionDelay(CollectorSnapshot snapshot, int layoutValidationRetryAttempt = 1) => snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE" ? ResourcePressureRetryDelay : snapshot.LayoutDiscoveryStatus == "pending" && snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" && layoutValidationRetryAttempt <= 10 ? LayoutValidationRetryDelay : TimeSpan.FromSeconds(300);
     public async Task RunAsync(CancellationToken token)
     {
         int? knownPid = null;
@@ -285,13 +304,14 @@ public sealed class CollectorScheduler
             if (pid is null) { if (knownPid is not null) { log.Write("COD_CLOSED"); buildIdentity.Invalidate("process-closed"); } knownPid = null; nextCollectionAtUtc = null; Publish(Snapshot with { Enabled = true, Game = "Closed", CycleStatus = "COD_NOT_RUNNING", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(5), token); continue; }
             if (pid != knownPid) { if (knownPid is not null) buildIdentity.Invalidate("pid-changed"); knownPid = pid; layoutValidationRetryAttempt = 1; log.Write("COD_DETECTED", $"pid={pid}"); Publish(Snapshot with { Enabled = true, Game = "Running", CycleStatus = "WAITING_FOR_GAME", NextCollection = null, Error = null }); await Task.Delay(TimeSpan.FromSeconds(30), token); if (monitor.FindSinglePid() != pid) continue; }
             if (updatePreparationRequested) { await Task.Delay(TimeSpan.FromSeconds(1), token); continue; }
-            var trigger = Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" ? "layout-retry" : "scheduled";
+            var trigger = Snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE" ? "resource-retry" : Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING" ? "layout-retry" : "scheduled";
             await RunCycleAsync(pid.Value, token, trigger);
             var retryPendingLayout = Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING";
             var until = DateTimeOffset.UtcNow.Add(GetNextCollectionDelay(Snapshot, layoutValidationRetryAttempt));
             nextCollectionAtUtc = until;
             Publish(Snapshot with { NextCollection = until });
             if (retryPendingLayout) { log.Write("LAYOUT_VALIDATION_RETRY_SCHEDULED", $"attempt={layoutValidationRetryAttempt + 1} retrySeconds={(int)(until - DateTimeOffset.UtcNow).TotalSeconds} dueUtc={until:O}"); layoutValidationRetryAttempt++; }
+            else if (Snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE") log.Write("RESOURCE_PRESSURE_DEFERRED", $"retrySeconds={(int)(until - DateTimeOffset.UtcNow).TotalSeconds} dueUtc={until:O}");
             else layoutValidationRetryAttempt = 1;
             while (DateTimeOffset.UtcNow < until && !token.IsCancellationRequested && monitor.FindSinglePid() == knownPid) await Task.Delay(TimeSpan.FromSeconds(5), token);
         }
@@ -303,6 +323,7 @@ public sealed class CollectorScheduler
             if (IsRunningCycle) { log.Write("SYNC_NOW_SKIPPED", "reason=cycle-in-progress"); return; }
             log.Write("SYNC_NOW_REQUESTED", $"layoutPending={Snapshot.LayoutDiscoveryStatus == "pending" && Snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING"}");
             await RunCycleAsync(monitor.FindSinglePid()!.Value, token, "manual");
+            if (Snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE") log.Write("SYNC_NOW_SKIPPED", "reason=system-resource-pressure");
             if (nextCollectionAtUtc is { } until && until > DateTimeOffset.UtcNow) Publish(Snapshot with { NextCollection = until });
         }
     }
@@ -310,9 +331,17 @@ public sealed class CollectorScheduler
     {
         if (updatePreparationRequested) return;
         if (!await cycleLock.WaitAsync(0, token)) { log.Write("CYCLE_SKIPPED", "reason=cycle-in-progress"); return; }
-        var started = DateTimeOffset.UtcNow; Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", CycleStartedAt = started, NextCollection = null }); log.Write("CYCLE_START", $"trigger={trigger}");
+        var started = DateTimeOffset.UtcNow;
         try
         {
+            var resourceSnapshot = resources.Sample("pre-cycle");
+            if (ResourcePressurePolicy.Evaluate(resourceSnapshot) == ResourcePressureLevel.Critical)
+            {
+                Publish(Snapshot with { Game = "Running", CycleStatus = "SYSTEM_RESOURCE_PRESSURE", CycleStartedAt = null, NextCollection = null, Error = "Waiting for system resources" });
+                log.Write("CYCLE_DEFERRED", $"trigger={trigger} reason=system-resource-pressure");
+                return;
+            }
+            Publish(Snapshot with { Game = "Running", CycleStatus = "RUNNING", CycleStartedAt = started, NextCollection = null }); log.Write("CYCLE_START", $"trigger={trigger}");
             var identity = await buildIdentity.GetOrCreateAsync(monitor.Describe(pid), token);
             engine.LayoutValidationRetryAttempt = layoutValidationRetryAttempt;
             engine.CollectionTrigger = trigger;
@@ -330,7 +359,7 @@ public sealed class CollectorScheduler
             Publish(snapshot); log.Write(snapshot.CycleStatus is "OK" ? "CYCLE_OK" : snapshot.CycleStatus is "UNSUPPORTED_BUILD" ? "UNSUPPORTED_BUILD" : "CYCLE_PARTIAL", $"exitCode={result.ExitCode}");
         }
         catch (Exception ex) { Publish(Snapshot with { Game = "Running", CycleStatus = "FAILED", CycleStartedAt = null, Error = "Engine error" }); log.Write("ENGINE_ERROR", ex.Message); log.Write("CYCLE_FAILED", $"type={ex.GetType().Name} durationMs={(long)(DateTimeOffset.UtcNow - started).TotalMilliseconds}"); }
-        finally { cycleLock.Release(); }
+        finally { resources.Sample("post-cycle"); cycleLock.Release(); }
     }
     public void RequestUpdatePreparation() => updatePreparationRequested = true;
     public void CancelUpdatePreparation() => updatePreparationRequested = false;

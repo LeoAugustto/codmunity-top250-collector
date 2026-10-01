@@ -3,7 +3,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="CODMunity Top 250 Collector"
            Manufacturer="CODMunity"
-           Version="0.1.26"
+           Version="0.1.27"
            UpgradeCode="{6E04B728-7C32-48E9-9174-EEDB73E098C9}"
            Scope="perUser"
            InstallerVersion="500">
@@ -29,7 +29,7 @@
                                      Property="DOTNET_DESKTOP_RUNTIME_8_X64"
                                      RuntimeType="desktop"
                                      Platform="x64"
-                                     Version="8.0.0"
+                                     Version="8.0.31"
                                      RollForward="latestPatch" />
     <Launch Condition="Installed OR DOTNET_DESKTOP_RUNTIME_8_X64 = 0"
             Message="Microsoft .NET 8 Desktop Runtime (x64) is required to run CODMunity Top 250 Collector." />

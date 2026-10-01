@@ -69,10 +69,11 @@ public partial class MainWindow : Window
         var isSyncing = snapshot.CycleStatus == "RUNNING";
         var layoutPending = snapshot.LayoutDiscoveryStatus == "pending" || snapshot.Build == "LayoutDiscoveryPending";
         var layoutValidationPending = layoutPending && snapshot.CycleStatus == "LAYOUT_VALIDATION_PENDING";
+        var resourcePressure = snapshot.CycleStatus == "SYSTEM_RESOURCE_PRESSURE";
         var layoutAmbiguous = snapshot.LayoutDiscoveryStatus == "ambiguous" || snapshot.Build == "LayoutAmbiguous";
         var layoutUnsupported = snapshot.LayoutDiscoveryStatus == "unsupported" || snapshot.Build == "LayoutUnsupported" || snapshot.CycleStatus == "BUILD_ID_UNAVAILABLE";
         var unresolvedLayout = layoutPending || layoutAmbiguous || layoutUnsupported;
-        var failed = snapshot.CycleStatus is "FAILED" or "PARTIAL_FAILURE" || !string.IsNullOrWhiteSpace(snapshot.Error);
+        var failed = !resourcePressure && (snapshot.CycleStatus is "FAILED" or "PARTIAL_FAILURE" || !string.IsNullOrWhiteSpace(snapshot.Error));
         var waitingForData = snapshot.CycleStatus is "WAITING_FOR_CACHE" or "WAITING_FOR_GAME";
         var gameRunning = snapshot.Game == "Running";
 
@@ -89,6 +90,8 @@ public partial class MainWindow : Window
             SetPrimaryStatus("Layout discovery ambiguous", "Collection is paused until the game layout can be validated safely.", (MediaBrush)FindResource("Yellow"));
         else if (layoutUnsupported)
             SetPrimaryStatus("Unsupported game build", "Layout discovery could not validate this game build safely.", (MediaBrush)FindResource("Yellow"));
+        else if (resourcePressure)
+            SetPrimaryStatus("Waiting for system resources", "Collection will resume automatically when Windows commit pressure is safe.", (MediaBrush)FindResource("Yellow"));
         else if (failed)
             SetPrimaryStatus("Collection failed", "The collector will try again on the next scheduled sync.", (MediaBrush)FindResource("Red"));
         else if (!gameRunning)

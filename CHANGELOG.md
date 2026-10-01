@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.27-alpha
+
+- Protect collection when the host is under critical Windows commit pressure, preserving the last valid snapshot and retrying without restarting the station.
+- Record lightweight local system, Collector, and engine-process resource diagnostics for long-running station analysis.
+- Fix single-instance mutex ownership and shutdown wait-handle lifetime handling.
+- Require Microsoft .NET Desktop Runtime 8.0.31 or a newer compatible 8.x servicing patch for installer validation.
+
 ## 0.1.26-alpha
 
 - Keep a structurally valid discovered Battle.net layout in a pending state while Call of Duty data is temporarily unavailable for live validation.
