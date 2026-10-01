@@ -7,7 +7,7 @@ The application reads the supported local game layouts, keeps the active leaderb
 ## Requirements
 
 - Windows 10/11 x64
-- .NET 8 SDK for development; Microsoft .NET 8 Desktop Runtime x64 8.0.31 or newer compatible servicing patch for framework-dependent builds
+- .NET 8 SDK for development; Microsoft .NET 8 Desktop Runtime x64 for framework-dependent builds. Setup installs the 8.0.31 servicing baseline when needed; direct internal MSI updates remain compatible with installed .NET 8.0.x Desktop Runtime.
 - Windows PowerShell 5.1 for the bundled engine
 - WiX Toolset dependencies restored through the solution for MSI/Bundle builds
 - Git and GitHub CLI (`gh`) for source backup and GitHub release mirroring

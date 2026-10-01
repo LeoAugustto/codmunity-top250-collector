@@ -5,7 +5,7 @@
 - Protect collection when the host is under critical Windows commit pressure, preserving the last valid snapshot and retrying without restarting the station.
 - Record lightweight local system, Collector, and engine-process resource diagnostics for long-running station analysis.
 - Fix single-instance mutex ownership and shutdown wait-handle lifetime handling.
-- Require Microsoft .NET Desktop Runtime 8.0.31 or a newer compatible 8.x servicing patch for installer validation.
+- Update the manual Setup prerequisite payload to Microsoft .NET Desktop Runtime 8.0.31 while preserving compatible .NET 8 servicing support for direct MSI auto-updates.
 
 ## 0.1.26-alpha
 

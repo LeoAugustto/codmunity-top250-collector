@@ -29,7 +29,7 @@
                                      Property="DOTNET_DESKTOP_RUNTIME_8_X64"
                                      RuntimeType="desktop"
                                      Platform="x64"
-                                     Version="8.0.31"
+                                     Version="8.0.0"
                                      RollForward="latestPatch" />
     <Launch Condition="Installed OR DOTNET_DESKTOP_RUNTIME_8_X64 = 0"
             Message="Microsoft .NET 8 Desktop Runtime (x64) is required to run CODMunity Top 250 Collector." />

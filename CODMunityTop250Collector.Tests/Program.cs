@@ -492,8 +492,12 @@ static void InstallerLaunchContractTests()
     if (!bundle.Contains("DetectCondition=\"DOTNET_DESKTOP_RUNTIME_8_X64 &gt;= v8.0.31\"", StringComparison.Ordinal) ||
         !bundle.Contains("windowsdesktop-runtime-8.0.31-win-x64.exe", StringComparison.Ordinal) ||
         !bundle.Contains("605189223CF0A64BFB5453520B794D1D386A97C7E65E3944FEAF9214DB1A8B247F66C569265AEF4204447BAF5B5FF19559C323D887E1318F17DEB28A5AF0FA12", StringComparison.Ordinal) ||
-        !msi.Contains("Version=\"8.0.31\"", StringComparison.Ordinal)) throw new Exception(".NET Desktop Runtime 8.0.31 baseline contract");
+        !msi.Contains("Version=\"8.0.0\"", StringComparison.Ordinal) || !msi.Contains("RollForward=\"latestPatch\"", StringComparison.Ordinal)) throw new Exception("Setup servicing baseline / MSI compatible runtime contract");
+    if (!ManualSetupRuntimePackageApplicable("8.0.30") || ManualSetupRuntimePackageApplicable("8.0.31") || !AutomaticMsiRuntimeAllowed("8.0.30") || !AutomaticMsiRuntimeAllowed("8.0.31") || AutomaticMsiRuntimeAllowed(null) || AutomaticMsiRuntimeAllowed("9.0.0")) throw new Exception("installer runtime compatibility policy contract");
 }
+
+static bool ManualSetupRuntimePackageApplicable(string installedVersion) => Version.TryParse(installedVersion, out var version) && version < new Version(8, 0, 31);
+static bool AutomaticMsiRuntimeAllowed(string? installedVersion) => Version.TryParse(installedVersion, out var version) && version.Major == 8 && version.Minor == 0;
 
 static void StartupRegistrationTests()
 {
